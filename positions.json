@@ -1,0 +1,12 @@
+[
+  {
+    "ticker": "DDOG",
+    "strike": 100.0,
+    "expiry": "2026-05-15",
+    "direction": "put",
+    "side": "short",
+    "premium_collected": 809.0,
+    "contracts": 1,
+    "closed": false
+  }
+]

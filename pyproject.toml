@@ -1,0 +1,19 @@
+[project]
+name = "mesa"
+version = "0.1.0"
+description = "Watchdog + Prospector agents for options monitoring"
+requires-python = ">=3.11"
+dependencies = [
+    "yfinance>=0.2.36",
+    "python-telegram-bot>=21.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "rich>=13.0",
+]
+
+[project.scripts]
+mesa = "mesa.cli:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
