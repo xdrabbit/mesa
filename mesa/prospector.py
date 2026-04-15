@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 WATCHLIST = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA",
     "AMD", "CRM", "DDOG", "NET", "SNOW", "PLTR", "COIN",
-    "SQ", "SHOP", "ABNB", "UBER", "NFLX", "DIS",
+    "XYZ", "SHOP", "ABNB", "UBER", "NFLX", "DIS",
 ]
 
 MIN_ANNUALIZED_RETURN = 0.15
@@ -89,7 +89,10 @@ def _scan_ticker(ticker: str, today: date) -> list[str]:
 
             bid = float(row.get("bid", 0))
             ask = float(row.get("ask", 0))
-            oi = int(row.get("openInterest", 0) or 0)
+            try:
+                oi = int(row.get("openInterest", 0) or 0)
+            except (ValueError, TypeError):
+                continue
 
             if bid <= 0 or ask <= 0:
                 continue
