@@ -1,6 +1,12 @@
-# Mesa cron jobs — edit paths to match your install
-# Watchdog: every 30 min during market hours (Mon-Fri, 9:30-16:00 ET)
-*/30 9-15 * * 1-5 cd /path/to/mesa && .venv/bin/mesa watchdog >> /var/log/mesa/watchdog.log 2>&1
+# Mesa cron jobs (all times MT)
+# Watchdog check: 8:30 AM MT Mon-Fri (silent unless triggered)
+30 8 * * 1-5 cd /path/to/mesa && .venv/bin/mesa watchdog >> /var/log/mesa/watchdog.log 2>&1
 
-# Prospector: once daily at 8:00 AM ET (before market open)
-0 8 * * 1-5 cd /path/to/mesa && .venv/bin/mesa prospector >> /var/log/mesa/prospector.log 2>&1
+# Watchdog check: 12:00 PM MT Mon-Fri (silent unless triggered)
+0 12 * * 1-5 cd /path/to/mesa && .venv/bin/mesa watchdog >> /var/log/mesa/watchdog.log 2>&1
+
+# Watchdog summary: 6:00 PM MT Sunday (always sends full report)
+0 18 * * 0 cd /path/to/mesa && .venv/bin/mesa watchdog --summary >> /var/log/mesa/watchdog.log 2>&1
+
+# Prospector: 5:00 PM MT Sunday
+0 17 * * 0 cd /path/to/mesa && .venv/bin/mesa prospector >> /var/log/mesa/prospector.log 2>&1

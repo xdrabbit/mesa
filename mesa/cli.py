@@ -1,9 +1,10 @@
 """CLI entry point for mesa agents.
 
 Usage:
-    mesa watchdog     — check open positions, send alerts
-    mesa prospector   — scan for new put-selling opportunities
-    mesa status       — print current positions to stdout
+    mesa watchdog              — silent check, alerts only on triggers
+    mesa watchdog --summary    — full position report (Sunday)
+    mesa prospector            — scan for new put-selling opportunities
+    mesa status                — print current positions to stdout
 """
 from __future__ import annotations
 
@@ -27,11 +28,16 @@ def main() -> None:
         choices=["watchdog", "prospector", "status"],
         help="Agent to run",
     )
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="Force full report (watchdog summary mode)",
+    )
     args = parser.parse_args()
 
     if args.command == "watchdog":
         from mesa.watchdog import run
-        run()
+        run(summary=args.summary)
     elif args.command == "prospector":
         from mesa.prospector import run
         run()
