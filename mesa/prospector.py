@@ -14,16 +14,26 @@ from datetime import date, timedelta
 
 import yfinance as yf
 
-from mesa.telegram import send
+from mesa.telegram_send import send
 
 log = logging.getLogger(__name__)
 
-# Watchlist of tickers to scan
+# Quality watchlist (priority targets)
+# Stocks you'd actually want to own if assigned
 WATCHLIST = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA",
-    "AMD", "CRM", "DDOG", "NET", "SNOW", "PLTR", "COIN",
-    "XYZ", "SHOP", "ABNB", "UBER", "NFLX", "DIS",
+    "JPM", "ABBV", "KO", "DDOG", "MSFT", "AAPL", "AMZN",
+    "GOOGL", "META", "V", "MA", "UNH", "PG", "JNJ",
+    "WMT", "HD", "NET", "SNOW", "CRM", "NOW",
 ]
+
+# Exclusions
+CRYPTO_EXCLUSION = {"MARA", "RIOT", "COIN", "MSTR", "CLSK", "HOOD"}
+ACCOUNTING_ISSUES = set()
+
+# Constraints
+MIN_STOCK_PRICE = 50.0    # Too small/volatile below $50
+MAX_STOCK_PRICE = 110.0   # Capital constraint: $10k max
+MIN_MARKET_CAP = 1e10     # $10 billion minimum
 
 MIN_ANNUALIZED_RETURN = 0.15
 MIN_OPEN_INTEREST = 100
@@ -53,11 +63,40 @@ def run() -> None:
 
 
 def _scan_ticker(ticker: str, today: date) -> list[str]:
+    # EXCLUSION FILTERS
+    if ticker in CRYPTO_EXCLUSION:
+        log.debug(f"Skipping {ticker}: crypto-related")
+        return []
+    
+    if ticker in ACCOUNTING_ISSUES:
+        log.debug(f"Skipping {ticker}: known accounting issues")
+        return []
+    
     t = yf.Ticker(ticker)
     price_hist = t.history(period="1d")
     if price_hist.empty:
+        log.debug(f"Skipping {ticker}: no price data")
         return []
     price = float(price_hist["Close"].iloc[-1])
+    
+    # Price range filter (wheel strategy: $50-$110 sweet spot)
+    if price < MIN_STOCK_PRICE:
+        log.debug(f"Skipping {ticker}: ${price:.2f} < ${MIN_STOCK_PRICE} (too small)")
+        return []
+    
+    if price > MAX_STOCK_PRICE:
+        log.debug(f"Skipping {ticker}: ${price:.2f} > ${MAX_STOCK_PRICE} (capital constraint)")
+        return []
+    
+    # Market cap filter
+    try:
+        info = t.info
+        market_cap = info.get("marketCap")
+        if market_cap and market_cap < MIN_MARKET_CAP:
+            log.debug(f"Skipping {ticker}: market cap ${market_cap/1e9:.1f}B < $10B")
+            return []
+    except Exception as e:
+        log.debug(f"Could not check market cap for {ticker}: {e}")
 
     expiries = t.options
     hits: list[tuple[float, str]] = []  # (annualized_return, message)

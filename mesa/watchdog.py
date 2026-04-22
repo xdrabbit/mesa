@@ -18,7 +18,7 @@ from datetime import date
 
 from mesa.models import Position, load_positions
 from mesa.market import get_price, get_option_chain
-from mesa.telegram import send
+from mesa.telegram_send import send
 
 log = logging.getLogger(__name__)
 

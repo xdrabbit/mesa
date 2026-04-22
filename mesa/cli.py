@@ -4,6 +4,8 @@ Usage:
     mesa watchdog              — silent check, alerts only on triggers
     mesa watchdog --summary    — full position report (Sunday)
     mesa prospector            — scan for new put-selling opportunities
+    mesa screen <CRITERIA>     — conversational screening (e.g. "under $50" "high IV")
+    mesa bot                   — Telegram webhook bot (polling mode)
     mesa status                — print current positions to stdout
 """
 from __future__ import annotations
@@ -25,8 +27,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="mesa", description="Options monitoring agents")
     parser.add_argument(
         "command",
-        choices=["watchdog", "prospector", "status"],
+        choices=["watchdog", "prospector", "screen", "bot", "status"],
         help="Agent to run",
+    )
+    parser.add_argument(
+        "criteria",
+        nargs="*",
+        help="Screening criteria (for 'screen' command)",
     )
     parser.add_argument(
         "--summary",
@@ -41,6 +48,20 @@ def main() -> None:
     elif args.command == "prospector":
         from mesa.prospector import run
         run()
+    elif args.command == "screen":
+        if not args.criteria:
+            print("Usage: mesa screen <criteria>")
+            print("Examples:")
+            print("  mesa screen under 50")
+            print("  mesa screen between 30 and 80")
+            print("  mesa screen DDOG NFLX")
+            sys.exit(1)
+        from mesa.conversational import handle_message
+        handle_message(" ".join(args.criteria))
+    elif args.command == "bot":
+        import asyncio
+        from mesa.webhook import main
+        asyncio.run(main())
     elif args.command == "status":
         _status()
 

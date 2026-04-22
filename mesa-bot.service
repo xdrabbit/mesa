@@ -1,0 +1,18 @@
+[Unit]
+Description=Mesa Telegram Prospector Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tom
+WorkingDirectory=/home/tom/blackbird_dev/mesa
+ExecStart=/home/tom/blackbird_dev/mesa/run-bot.sh
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/tmp/mesa-bot.log
+StandardError=append:/tmp/mesa-bot.log
+Environment="PYTHONUNBUFFERED=1"
+
+[Install]
+WantedBy=multi-user.target
