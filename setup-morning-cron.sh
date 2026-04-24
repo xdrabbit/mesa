@@ -17,8 +17,12 @@ echo ""
 # Create log directory
 if [ ! -d "$LOG_DIR" ]; then
   echo "Creating log directory: $LOG_DIR"
-  sudo mkdir -p "$LOG_DIR"
-  sudo chmod 755 "$LOG_DIR"
+  mkdir -p "$LOG_DIR" 2>/dev/null || {
+    echo "⚠️  Cannot create $LOG_DIR (needs sudo)"
+    LOG_DIR="/tmp/mesa-logs"
+    mkdir -p "$LOG_DIR"
+    echo "Using $LOG_DIR instead"
+  }
 fi
 
 # Check venv exists
