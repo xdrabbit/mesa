@@ -1,15 +1,27 @@
 """Prospector agent — scans for attractive covered call opportunities (premium selling).
 
-Criteria:
-  - Stock price: $80–$140
+Two-tier strategy:
+
+TIER 1 (CORE TECH): Familiar stocks (AAPL, MSFT, NVDA, GOOGL, META, AMZN, etc.)
+  - Stock price: $70-$140
+  - Minimum credit: $200 per contract
+  - Strike cushion: ≥ 8% above current price
+  - All standard filters (IV, DTE, delta, liquidity)
+
+TIER 2 (NON-CORE SWEET DEALS): Healthcare, airlines, energy, defense (UNH, JNJ, etc.)
+  - Stock price: $70-$140
+  - Minimum credit: $500 per contract (stricter)
+  - Strike cushion: ≥ 10% above current price (stricter)
+  - Only show if numbers are exceptional
+
+Common filters:
   - Market cap: > $10B
   - IV: 35%–65%
   - Earnings: No earnings within 14 days
   - DTE: 25–45 days out
   - Delta: 0.20–0.30 (for short calls)
-  - Strike: ≥ 8% above current price (cushion)
   - Premium: ≥ 1.0% of strike price
-  - Liquid options (open interest ≥ 500, bid-ask spread ≤ 5%)
+  - Liquidity: open interest ≥ 500, bid-ask spread ≤ 5%
 """
 from __future__ import annotations
 
@@ -37,7 +49,6 @@ ACCOUNTING_ISSUES = set()
 # Constraints
 MIN_STOCK_PRICE = 70.0    # Ideal wheel range
 MAX_STOCK_PRICE = 140.0   # Ideal wheel range
-MIN_CREDIT_PRICE = 2.00   # Minimum $200 per contract ($2.00 * 100 shares)
 MIN_MARKET_CAP = 1e10     # $10 billion minimum
 
 # IV filter (35-65% range)
@@ -52,10 +63,36 @@ TARGET_DTE_MIN = 25
 TARGET_DTE_MAX = 45
 TARGET_DELTA_MIN = 0.20
 TARGET_DELTA_MAX = 0.30
-MIN_STRIKE_CUSHION_PCT = 0.08  # 8% above current price
 MIN_PREMIUM_PCT_OF_STRIKE = 0.01  # 1.0% of strike
 MIN_OPEN_INTEREST = 500
 MAX_BID_ASK_SPREAD_PCT = 0.05  # 5%
+
+# Two-tier premium/cushion filters
+CORE_INDUSTRIES = {
+    "AAPL", "MSFT", "NVDA", "GOOGL", "META", "AMZN",
+    "DDOG", "CRM", "NOW", "NET", "SNOW",
+}
+
+NON_CORE_INDUSTRIES = {
+    # Healthcare
+    "UNH", "JNJ", "PG", "ABBV",
+    # Airlines
+    "DAL", "UAL", "AAL",
+    # Energy
+    "XOM", "CVX", "MPC",
+    # Defense
+    "RTX", "BA", "NOC",
+    # Finance & other
+    "V", "MA", "JPM", "WMT", "HD", "KO",
+}
+
+# Tier 1 (Core tech): relaxed filters
+CORE_MIN_CREDIT_PRICE = 2.00   # $200 per contract
+CORE_MIN_STRIKE_CUSHION_PCT = 0.08  # 8%
+
+# Tier 2 (Non-core sweet deals): stricter filters
+NON_CORE_MIN_CREDIT_PRICE = 5.00   # $500 per contract
+NON_CORE_MIN_STRIKE_CUSHION_PCT = 0.10  # 10%
 
 
 def run() -> None:
@@ -137,9 +174,14 @@ def _scan_ticker(ticker: str, today: date) -> list[str]:
             if strike <= price:
                 continue
 
-            # Strike cushion: at least 8% above current price
+            # Strike cushion: two-tier based on industry
             cushion_pct = (strike - price) / price
-            if cushion_pct < MIN_STRIKE_CUSHION_PCT:
+            if ticker in CORE_INDUSTRIES:
+                min_cushion = CORE_MIN_STRIKE_CUSHION_PCT
+            else:
+                min_cushion = NON_CORE_MIN_STRIKE_CUSHION_PCT
+            
+            if cushion_pct < min_cushion:
                 continue
 
             # Delta filter: 0.20-0.30 for short calls
@@ -167,8 +209,13 @@ def _scan_ticker(ticker: str, today: date) -> list[str]:
             mid = (bid + ask) / 2
             premium_per_contract = mid * 100
 
-            # Minimum credit filter: must be >= $200 per contract
-            if mid < MIN_CREDIT_PRICE:
+            # Minimum credit filter: two-tier based on industry
+            if ticker in CORE_INDUSTRIES:
+                min_credit = CORE_MIN_CREDIT_PRICE
+            else:
+                min_credit = NON_CORE_MIN_CREDIT_PRICE
+            
+            if mid < min_credit:
                 continue
 
             # Premium quality: must be >= 1.0% of strike
