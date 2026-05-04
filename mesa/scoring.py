@@ -245,8 +245,8 @@ def score_candidates(candidates: list[Candidate]) -> dict:
     return organized
 
 
-def format_report(candidates: list[Candidate], limit_green: int = 3, limit_yellow: int = 10) -> str:
-    """Format full report with three colors and ranking."""
+def format_report(candidates: list[Candidate], limit_green: int = 3, limit_yellow: int = 10, hide_red: bool = True) -> str:
+    """Format report with GREEN and YELLOW only (RED hidden by default)."""
     organized = score_candidates(candidates)
     
     lines = ["🚦 *Prospector Report*\n"]
@@ -270,10 +270,10 @@ def format_report(candidates: list[Candidate], limit_green: int = 3, limit_yello
     else:
         lines.append("*🟡 YELLOW — None*\n")
     
-    # 🔴 RED (collapsed - wrong stock forever)
-    if organized["🔴"]:
+    # 🔴 RED (hidden by default - too noisy)
+    if not hide_red and organized["🔴"]:
         lines.append("*🔴 RED — SKIP (FUNDAMENTAL ISSUES)*")
-        for c in organized["🔴"][:5]:  # Show only first 5
+        for c in organized["🔴"][:5]:
             lines.append(c.format())
         if len(organized["🔴"]) > 5:
             lines.append(f"  ... and {len(organized['🔴']) - 5} more")

@@ -35,8 +35,9 @@ CRYPTO_EXCLUSION = {"MARA", "RIOT", "COIN", "MSTR", "CLSK", "HOOD"}
 ACCOUNTING_ISSUES = set()
 
 # Constraints
-MIN_STOCK_PRICE = 80.0    # Ideal wheel range
+MIN_STOCK_PRICE = 70.0    # Ideal wheel range
 MAX_STOCK_PRICE = 140.0   # Ideal wheel range
+MIN_CREDIT_PRICE = 2.00   # Minimum $200 per contract ($2.00 * 100 shares)
 MIN_MARKET_CAP = 1e10     # $10 billion minimum
 
 # IV filter (35-65% range)
@@ -69,8 +70,8 @@ def run() -> None:
             log.error("Error scanning %s: %s", ticker, e)
 
     if results:
-        header = f"🔭 *Prospector Report* — {today}\nTop cash-secured put candidates:\n"
-        # Cap at top 10 by annualized return (already sorted per ticker)
+        header = f"🔭 *Prospector Report* — {today}\nTop covered call candidates (GREEN/YELLOW only):\n"
+        # Cap at top 10 by score
         body = "\n\n".join(results[:10])
         send(header + "\n" + body)
     else:
@@ -165,6 +166,10 @@ def _scan_ticker(ticker: str, today: date) -> list[str]:
 
             mid = (bid + ask) / 2
             premium_per_contract = mid * 100
+
+            # Minimum credit filter: must be >= $200 per contract
+            if mid < MIN_CREDIT_PRICE:
+                continue
 
             # Premium quality: must be >= 1.0% of strike
             premium_pct_of_strike = (mid / strike) * 100
