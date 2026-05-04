@@ -98,11 +98,19 @@ NON_CORE_MIN_STRIKE_CUSHION_PCT = 0.10  # 10%
 def run() -> None:
     today = date.today()
     results: list[str] = []
+    near_misses_core: list[tuple[float, str]] = []  # (score, message)
+    near_misses_non_core: list[tuple[float, str]] = []
 
     for ticker in WATCHLIST:
         try:
-            hits = _scan_ticker(ticker, today)
+            hits, near_miss = _scan_ticker(ticker, today)
             results.extend(hits)
+            if near_miss:
+                tier, score, msg = near_miss
+                if tier == "CORE":
+                    near_misses_core.append((score, msg))
+                else:
+                    near_misses_non_core.append((score, msg))
         except Exception as e:
             log.error("Error scanning %s: %s", ticker, e)
 
@@ -112,34 +120,68 @@ def run() -> None:
         body = "\n\n".join(results[:10])
         send(header + "\n" + body)
     else:
+        # No opportunities found - show nearest miss in each tier
         log.info("No attractive opportunities found")
+        
+        message_parts = [f"🔭 *Prospector Report* — {today}\n"]
+        message_parts.append("*No opportunities today.*\n")
+        message_parts.append("Nearest misses:\n")
+        
+        # Best near-miss in CORE tier
+        if near_misses_core:
+            near_misses_core.sort(key=lambda x: x[0], reverse=True)
+            message_parts.append("\n*CORE TECH (Nearest Miss):*\n")
+            message_parts.append(near_misses_core[0][1])
+        
+        # Best near-miss in NON-CORE tier
+        if near_misses_non_core:
+            near_misses_non_core.sort(key=lambda x: x[0], reverse=True)
+            message_parts.append("\n*NON-CORE (Nearest Miss):*\n")
+            message_parts.append(near_misses_non_core[0][1])
+        
+        if near_misses_core or near_misses_non_core:
+            send("\n".join(message_parts))
+        else:
+            log.info("No near-misses either (all stocks filtered at early stage)")
 
 
-def _scan_ticker(ticker: str, today: date) -> list[str]:
+def _scan_ticker(ticker: str, today: date) -> tuple[list[str], tuple[str, float, str] | None]:
+    """Scan ticker for opportunities. Returns (hits, near_miss).
+    
+    near_miss format: (tier, score, message) or None if no near-miss to report
+    """
     # EXCLUSION FILTERS
     if ticker in CRYPTO_EXCLUSION:
         log.debug(f"Skipping {ticker}: crypto-related")
-        return []
+        return [], None
     
     if ticker in ACCOUNTING_ISSUES:
         log.debug(f"Skipping {ticker}: known accounting issues")
-        return []
+        return [], None
     
     t = yf.Ticker(ticker)
     price_hist = t.history(period="1d")
     if price_hist.empty:
         log.debug(f"Skipping {ticker}: no price data")
-        return []
+        return [], None
     price = float(price_hist["Close"].iloc[-1])
     
-    # Price range filter (wheel strategy: $50-$110 sweet spot)
+    # Price range filter (wheel strategy: $70-$140 range)
+    # Track near-miss if price is close but outside range
+    price_near_miss = None
     if price < MIN_STOCK_PRICE:
         log.debug(f"Skipping {ticker}: ${price:.2f} < ${MIN_STOCK_PRICE} (too small)")
-        return []
+        price_near_miss = (0.5, "CORE" if ticker in CORE_INDUSTRIES else "NON_CORE", 
+                          f"⚠️ {ticker} ${price:.2f} — price below range (need ${MIN_STOCK_PRICE})")
+        return [], price_near_miss
     
     if price > MAX_STOCK_PRICE:
         log.debug(f"Skipping {ticker}: ${price:.2f} > ${MAX_STOCK_PRICE} (capital constraint)")
-        return []
+        # Track near-miss for price-out-of-range
+        pct_drop_needed = ((price - MAX_STOCK_PRICE) / price) * 100  # % drop needed
+        price_near_miss = (0.7, "CORE" if ticker in CORE_INDUSTRIES else "NON_CORE",
+                          f"⚠️ *{ticker}* ${price:.2f} — above range\n  Need {pct_drop_needed:.0f}% drop to ${MAX_STOCK_PRICE}")
+        return [], price_near_miss
     
     # Market cap filter
     try:
@@ -147,18 +189,22 @@ def _scan_ticker(ticker: str, today: date) -> list[str]:
         market_cap = info.get("marketCap")
         if market_cap and market_cap < MIN_MARKET_CAP:
             log.debug(f"Skipping {ticker}: market cap ${market_cap/1e9:.1f}B < $10B")
-            return []
+            return [], None
     except Exception as e:
         log.debug(f"Could not check market cap for {ticker}: {e}")
 
     expiries = t.options
-    hits: list[tuple[float, str]] = []  # (annualized_return, message)
+    hits: list[tuple[float, str]] = []  # (score, message)
+    near_miss_candidate: tuple[float, str, str] | None = None  # (score, tier, message)
 
     for exp_str in expiries:
         exp_date = date.fromisoformat(exp_str)
         dte = (exp_date - today).days
         if dte < TARGET_DTE_MIN or dte > TARGET_DTE_MAX:
             continue
+        
+        # Reset near-miss per expiry (keep best across all expirations)
+        expiry_near_miss: tuple[float, str, str] | None = None
 
         try:
             chain = t.option_chain(exp_str)
@@ -174,13 +220,13 @@ def _scan_ticker(ticker: str, today: date) -> list[str]:
             if strike <= price:
                 continue
 
-            # Strike cushion: two-tier based on industry
+            # Determine tier
+            tier = "CORE" if ticker in CORE_INDUSTRIES else "NON_CORE"
+            min_cushion = CORE_MIN_STRIKE_CUSHION_PCT if tier == "CORE" else NON_CORE_MIN_STRIKE_CUSHION_PCT
+            min_credit = CORE_MIN_CREDIT_PRICE if tier == "CORE" else NON_CORE_MIN_CREDIT_PRICE
+
+            # Strike cushion filter
             cushion_pct = (strike - price) / price
-            if ticker in CORE_INDUSTRIES:
-                min_cushion = CORE_MIN_STRIKE_CUSHION_PCT
-            else:
-                min_cushion = NON_CORE_MIN_STRIKE_CUSHION_PCT
-            
             if cushion_pct < min_cushion:
                 continue
 
@@ -201,7 +247,16 @@ def _scan_ticker(ticker: str, today: date) -> list[str]:
 
             # Liquidity filter
             if oi < MIN_OPEN_INTEREST:
+                # Track as near-miss: has good credit but low OI
+                mid = (bid + ask) / 2
+                premium_pct_of_strike = (mid / strike) * 100
+                if mid >= min_credit and premium_pct_of_strike >= (MIN_PREMIUM_PCT_OF_STRIKE * 100):
+                    near_miss_score = (mid / min_credit) * (premium_pct_of_strike / 1.0) * 50  # Rough score
+                    near_miss_msg = f"⚠️ {ticker} ${strike:.0f} CALL — {exp_str}\n  Credit: ${mid:.2f} ({mid*100:.0f}/contract) ✓\n  Cushion: {cushion_pct:.1%} ✓\n  Problem: Only {oi} OI (need ≥500)"
+                    if not near_miss_candidate or near_miss_score > near_miss_candidate[0]:
+                        near_miss_candidate = (near_miss_score, tier, near_miss_msg)
                 continue
+            
             spread_pct = (ask - bid) / bid
             if spread_pct > MAX_BID_ASK_SPREAD_PCT:
                 continue
@@ -209,13 +264,14 @@ def _scan_ticker(ticker: str, today: date) -> list[str]:
             mid = (bid + ask) / 2
             premium_per_contract = mid * 100
 
-            # Minimum credit filter: two-tier based on industry
-            if ticker in CORE_INDUSTRIES:
-                min_credit = CORE_MIN_CREDIT_PRICE
-            else:
-                min_credit = NON_CORE_MIN_CREDIT_PRICE
-            
+            # Minimum credit filter
             if mid < min_credit:
+                # Near-miss: has good strike/cushion but low credit
+                premium_pct_of_strike = (mid / strike) * 100
+                near_miss_score = (mid / min_credit) * (cushion_pct / min_cushion) * 50
+                near_miss_msg = f"⚠️ {ticker} ${strike:.0f} CALL — {exp_str}\n  Credit: ${mid:.2f} ({mid*100:.0f}/contract) - need ${min_credit*100:.0f}\n  Cushion: {cushion_pct:.1%} ✓\n  Gap: ${(min_credit - mid)*100:.0f} more needed"
+                if not near_miss_candidate or near_miss_score > near_miss_candidate[0]:
+                    near_miss_candidate = (near_miss_score, tier, near_miss_msg)
                 continue
 
             # Premium quality: must be >= 1.0% of strike
@@ -237,6 +293,16 @@ def _scan_ticker(ticker: str, today: date) -> list[str]:
             )
             hits.append((annualized, msg))
 
-    # Sort by annualized return descending
+    # Sort by score descending
     hits.sort(key=lambda x: x[0], reverse=True)
-    return [msg for _, msg in hits[:3]]  # top 3 per ticker
+    
+    # Return top 3 hits and best near-miss (if any)
+    hit_messages = [msg for _, msg in hits[:3]]
+    
+    # Format near_miss if we have one: (tier, score, message)
+    near_miss_return = None
+    if near_miss_candidate:
+        score, tier, msg = near_miss_candidate
+        near_miss_return = (tier, score, msg)
+    
+    return hit_messages, near_miss_return
