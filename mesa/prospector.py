@@ -1,11 +1,15 @@
-"""Prospector agent — scans for attractive cash-secured put opportunities.
+"""Prospector agent — scans for attractive covered call opportunities (premium selling).
 
 Criteria:
-  - High implied volatility (IV rank proxy via option premium)
-  - Annualized return on capital >= 15%
-  - Delta roughly -0.20 to -0.35 (OTM sweet spot)
-  - Expiry 30-60 days out
-  - Liquid options (open interest > 100, bid-ask spread < 20%)
+  - Stock price: $80–$140
+  - Market cap: > $10B
+  - IV: 35%–65%
+  - Earnings: No earnings within 14 days
+  - DTE: 25–45 days out
+  - Delta: 0.20–0.30 (for short calls)
+  - Strike: ≥ 8% above current price (cushion)
+  - Premium: ≥ 1.0% of strike price
+  - Liquid options (open interest ≥ 500, bid-ask spread ≤ 5%)
 """
 from __future__ import annotations
 
@@ -19,11 +23,11 @@ from mesa.telegram_send import send
 log = logging.getLogger(__name__)
 
 # Quality watchlist (priority targets)
-# Stocks you'd actually want to own if assigned
+# Stocks you'd actually want to own long-term
 WATCHLIST = [
-    "JPM", "ABBV", "KO", "DDOG", "MSFT", "AAPL", "AMZN",
-    "GOOGL", "META", "V", "MA", "UNH", "PG", "JNJ",
-    "WMT", "HD", "NET", "SNOW", "CRM", "NOW",
+    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA",
+    "JPM", "V", "MA", "UNH", "JNJ", "PG", "KO",
+    "WMT", "HD", "ABBV", "DDOG", "CRM", "NOW",
 ]
 
 # Exclusions
@@ -31,15 +35,26 @@ CRYPTO_EXCLUSION = {"MARA", "RIOT", "COIN", "MSTR", "CLSK", "HOOD"}
 ACCOUNTING_ISSUES = set()
 
 # Constraints
-MIN_STOCK_PRICE = 50.0    # Too small/volatile below $50
-MAX_STOCK_PRICE = 110.0   # Capital constraint: $10k max
+MIN_STOCK_PRICE = 80.0    # Ideal wheel range
+MAX_STOCK_PRICE = 140.0   # Ideal wheel range
 MIN_MARKET_CAP = 1e10     # $10 billion minimum
 
-MIN_ANNUALIZED_RETURN = 0.15
-MIN_OPEN_INTEREST = 100
-MAX_BID_ASK_SPREAD_PCT = 0.20
-TARGET_DTE_MIN = 30
-TARGET_DTE_MAX = 60
+# IV filter (35-65% range)
+MIN_IV = 0.35
+MAX_IV = 0.65
+
+# Earnings buffer
+MIN_DAYS_TO_EARNINGS = 14
+
+# Option criteria
+TARGET_DTE_MIN = 25
+TARGET_DTE_MAX = 45
+TARGET_DELTA_MIN = 0.20
+TARGET_DELTA_MAX = 0.30
+MIN_STRIKE_CUSHION_PCT = 0.08  # 8% above current price
+MIN_PREMIUM_PCT_OF_STRIKE = 0.01  # 1.0% of strike
+MIN_OPEN_INTEREST = 500
+MAX_BID_ASK_SPREAD_PCT = 0.05  # 5%
 
 
 def run() -> None:
@@ -112,18 +127,23 @@ def _scan_ticker(ticker: str, today: date) -> list[str]:
         except ValueError:
             continue
 
-        puts = chain.puts
+        calls = chain.calls
 
-        for _, row in puts.iterrows():
+        for _, row in calls.iterrows():
             strike = float(row["strike"])
 
-            # Only OTM puts
-            if strike >= price:
+            # Only OTM calls (strike > current price)
+            if strike <= price:
                 continue
 
-            # Rough delta filter: strike between 80-95% of current price
-            moneyness = strike / price
-            if moneyness < 0.80 or moneyness > 0.95:
+            # Strike cushion: at least 8% above current price
+            cushion_pct = (strike - price) / price
+            if cushion_pct < MIN_STRIKE_CUSHION_PCT:
+                continue
+
+            # Delta filter: 0.20-0.30 for short calls
+            delta = float(row.get("delta", 0))
+            if delta < TARGET_DELTA_MIN or delta > TARGET_DELTA_MAX:
                 continue
 
             bid = float(row.get("bid", 0))
@@ -145,23 +165,23 @@ def _scan_ticker(ticker: str, today: date) -> list[str]:
 
             mid = (bid + ask) / 2
             premium_per_contract = mid * 100
-            capital_required = strike * 100  # cash-secured
 
-            # Annualized return on capital
-            raw_return = premium_per_contract / capital_required
-            annualized = raw_return * (365 / dte) if dte > 0 else 0
-
-            if annualized < MIN_ANNUALIZED_RETURN:
+            # Premium quality: must be >= 1.0% of strike
+            premium_pct_of_strike = (mid / strike) * 100
+            if premium_pct_of_strike < (MIN_PREMIUM_PCT_OF_STRIKE * 100):
                 continue
 
-            breakeven = strike - mid
-            cushion_pct = (price - breakeven) / price
+            # Annualized return (premium as % of stock price * 365/DTE)
+            raw_return = mid / price
+            annualized = raw_return * (365 / dte) if dte > 0 else 0
+
+            breakeven = strike + mid
 
             msg = (
-                f"📌 *{ticker}* ${strike:.0f} PUT — {exp_str} ({dte}d)\n"
+                f"📌 *{ticker}* ${strike:.0f} CALL — {exp_str} ({dte}d)\n"
                 f"  Price: ${price:.2f} | Mid: ${mid:.2f} (${premium_per_contract:.0f}/contract)\n"
-                f"  Annualized: {annualized:.0%} | Cushion: {cushion_pct:.1%}\n"
-                f"  OI: {oi:,} | Spread: {spread_pct:.0%}"
+                f"  Premium: {premium_pct_of_strike:.2f}% of strike | Annualized: {annualized:.0%}\n"
+                f"  Cushion: {cushion_pct:.1%} | OI: {oi:,} | Spread: {spread_pct:.0%}"
             )
             hits.append((annualized, msg))
 
