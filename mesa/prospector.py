@@ -45,6 +45,8 @@ WATCHLIST = [
 # Exclusions
 CRYPTO_EXCLUSION = {"MARA", "RIOT", "COIN", "MSTR", "CLSK", "HOOD"}
 ACCOUNTING_ISSUES = set()
+CLOSED_POSITIONS = {"DDOG"}  # Trades we closed, don't re-scan
+OPEN_POSITIONS = {"NOW"}  # Active positions, exclude from recommendations
 
 # Constraints
 MIN_STOCK_PRICE = 70.0    # Ideal wheel range
@@ -157,6 +159,14 @@ def _scan_ticker(ticker: str, today: date) -> tuple[list[str], tuple[str, float,
     
     if ticker in ACCOUNTING_ISSUES:
         log.debug(f"Skipping {ticker}: known accounting issues")
+        return [], None
+    
+    if ticker in CLOSED_POSITIONS:
+        log.debug(f"Skipping {ticker}: position closed, don't re-scan")
+        return [], None
+    
+    if ticker in OPEN_POSITIONS:
+        log.debug(f"Skipping {ticker}: active position in portfolio")
         return [], None
     
     t = yf.Ticker(ticker)

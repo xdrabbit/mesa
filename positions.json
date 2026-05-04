@@ -7,6 +7,18 @@
     "side": "short",
     "premium_collected": 809.0,
     "contracts": 1,
-    "closed": false
+    "closed": true,
+    "closed_date": "2026-05-04"
+  },
+  {
+    "ticker": "NOW",
+    "strike": 85.0,
+    "expiry": "2026-06-05",
+    "direction": "put",
+    "side": "short",
+    "premium_collected": 0.0,
+    "contracts": 1,
+    "closed": false,
+    "opened_date": "2026-05-04"
   }
 ]
