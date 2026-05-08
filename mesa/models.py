@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields as dataclass_fields
 from datetime import date
 from pathlib import Path
 from typing import Literal
@@ -41,7 +41,8 @@ def load_positions() -> list[Position]:
     if not POSITIONS_FILE.exists():
         return []
     data = json.loads(POSITIONS_FILE.read_text())
-    return [Position(**p) for p in data]
+    known = {f.name for f in dataclass_fields(Position)}
+    return [Position(**{k: v for k, v in p.items() if k in known}) for p in data]
 
 
 def save_positions(positions: list[Position]) -> None:
