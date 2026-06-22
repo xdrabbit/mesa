@@ -3,9 +3,11 @@
 Pipeline:
   1. Load priority watchlist (20 hand-picked tickers, marked ⭐ in output).
   2. Load full universe (S&P 500 ∪ Nasdaq 100) from cached Wikipedia data.
-  3. Pre-filter via yfinance .info: price band, market cap, sector, country, earnings.
-  4. Score remaining option chains: IV, DTE, delta, premium, liquidity, cushion.
-  5. Emit top 5 picks via Telegram. If zero pass, surface top 3 nearest misses.
+  3. Pre-filter via yfinance .info: price band, market cap, sector, country, solvency/quality.
+  4. Score remaining option chains: per-expiration earnings exclusion (fail-closed), IV, DTE,
+     delta, premium, liquidity, cushion.
+  5. Rank by the risk-adjusted mesa.scoring blend (not raw yield); priority names float to top.
+  6. Emit top 5 picks via Telegram. If zero pass, surface top 3 nearest misses.
 
 Open positions are loaded live from positions.json (mesa.models.load_positions),
 so closing or opening a position is reflected on the next scan.
@@ -15,11 +17,12 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 
 import yfinance as yf
 
 from mesa.models import load_positions
+from mesa.scoring import ACCOUNTING_ISSUES, risk_score
 from mesa.telegram_send import send
 from mesa.universe import load_universe
 
@@ -36,9 +39,21 @@ WATCHLIST = [
 PREFILTER_MIN_PRICE = 10.0
 PREFILTER_MAX_PRICE = 200.0
 PREFILTER_MIN_MARKET_CAP = 1e10  # $10B
-PREFILTER_MIN_DAYS_TO_EARNINGS = 14
 
 TICKER_SUBSTRING_EXCLUSIONS = ("MARA", "RIOT", "MSTR", "COIN", "SQQQ", "TQQQ", "UVXY")
+
+# --- Fix 2: solvency / quality gate (.info only) ---
+# Manually-flagged credit-distress names. yfinance exposes no clean "missed/deferred debt
+# interest payment" field, so distressed credits identified out-of-band (e.g. SATS per
+# RECON_PROSPECTOR.md) are hard-listed here. Mirrors scoring.ACCOUNTING_ISSUES, which is also
+# honored below.
+SOLVENCY_DISTRESS = {
+    "SATS",  # EchoStar — distressed credit / debt-service concerns (RECON_PROSPECTOR.md §6).
+}
+# Reject names whose trailing profit margin is deeply negative — a sourceable distress proxy.
+# Fail-OPEN on a missing margin field: a >$10B name without the field is not auto-excluded,
+# since healthy companies sometimes lack it. The hard solvency gate is the manual sets above.
+MIN_PROFIT_MARGIN = -0.20
 
 EXCLUDED_INDUSTRY_KEYWORDS = (
     "biotechnology",
@@ -81,17 +96,31 @@ class Candidate:
     premium: float
     dte: int
     annualized: float
+    # Risk-score inputs (Fix 3). Annualized yield is preserved above as a displayed metric and
+    # as the sort tiebreaker; it is no longer the sole ranking key.
+    cushion_pct: float = 0.0
+    oi: int = 0
+    spread_pct: float = 0.0
+    premium_pct_of_strike: float = 0.0  # PERCENT of strike (e.g. 1.5 == 1.5%).
 
     @property
     def score(self) -> float:
-        return self.annualized
+        """Risk-adjusted 0-100 score (Fix 3) via the shared mesa.scoring.risk_score blend."""
+        return risk_score(
+            premium_pct_of_strike=self.premium_pct_of_strike,
+            cushion_pct=self.cushion_pct,
+            iv=self.iv,
+            oi=self.oi,
+            spread_pct=self.spread_pct,
+        )
 
     def format_line(self, idx: int) -> str:
         marker = "⭐ " if self.is_priority else ""
         return (
             f"{idx}. {marker}{self.ticker} ${self.price:.0f} | "
             f"IV {self.iv * 100:.0f}% | ${self.strike:.0f}p | "
-            f"${self.premium:.2f} premium | {self.annualized * 100:.0f}% ann."
+            f"${self.premium:.2f} premium | {self.annualized * 100:.0f}% ann. | "
+            f"score {self.score:.0f}/100"
         )
 
 
@@ -130,8 +159,12 @@ def _passes_sector_filter(info: dict) -> tuple[bool, str]:
     return True, ""
 
 
-def _next_earnings_within(t: yf.Ticker, days: int) -> bool | None:
-    """True if next earnings is within `days`; False if not; None if unknown."""
+def _next_earnings_date(t: yf.Ticker) -> date | None:
+    """Soonest upcoming earnings date, or None if unavailable/unparseable.
+
+    Returns None whenever the data source is blind (no calendar, exception, only past dates).
+    Callers treat None as 'unknown' and FAIL CLOSED (exclude) — see `_earnings_admits`.
+    """
     try:
         cal = t.calendar
     except Exception:
@@ -142,15 +175,50 @@ def _next_earnings_within(t: yf.Ticker, days: int) -> bool | None:
     if not earnings_dates:
         return None
     today = date.today()
-    cutoff = today + timedelta(days=days)
+    upcoming: list[date] = []
     for ed in earnings_dates:
         try:
             ed_date = ed.date() if hasattr(ed, "date") else date.fromisoformat(str(ed)[:10])
         except (ValueError, TypeError):
             continue
-        if today <= ed_date <= cutoff:
-            return True
-    return False
+        if ed_date >= today:
+            upcoming.append(ed_date)
+    return min(upcoming) if upcoming else None
+
+
+def _earnings_admits(earnings_date: date | None, exp_date: date) -> tuple[bool, str]:
+    """Fix 1: earnings must not land within the option's life, and FAIL CLOSED if unknown.
+
+    Excludes when the next earnings date is unknown (treated as unsafe) or falls on/before the
+    expiration being evaluated — using the actual expiration, not a fixed look-ahead window.
+    """
+    if earnings_date is None:
+        return False, "earnings-unknown-excluded"
+    if earnings_date <= exp_date:
+        return False, f"earnings {earnings_date} on/before exp {exp_date}"
+    return True, ""
+
+
+def _solvency_admits(info: dict, ticker: str) -> tuple[bool, str]:
+    """Fix 2: fundamentals/solvency gate. Returns (admit, reason).
+
+    Hard exclusions: manual distressed-credit list and scoring.ACCOUNTING_ISSUES. Sourceable
+    proxy: deeply negative trailing profit margin. Fail-OPEN on a missing margin field (see
+    MIN_PROFIT_MARGIN note) — the manual sets are the hard gate, the margin is a best-effort add.
+    """
+    if ticker in ACCOUNTING_ISSUES:
+        return False, "solvency-excluded: accounting/SEC watchlist"
+    if ticker in SOLVENCY_DISTRESS:
+        return False, "solvency-excluded: distressed-credit watchlist"
+
+    pm = info.get("profitMargins")
+    try:
+        if pm is not None and float(pm) < MIN_PROFIT_MARGIN:
+            return False, f"solvency-excluded: profit margin {float(pm):.0%} < {MIN_PROFIT_MARGIN:.0%}"
+    except (ValueError, TypeError):
+        pass
+
+    return True, ""
 
 
 def _prefilter(ticker: str) -> tuple[yf.Ticker | None, dict | None, str | None]:
@@ -184,9 +252,13 @@ def _prefilter(ticker: str) -> tuple[yf.Ticker | None, dict | None, str | None]:
     if not sector_ok:
         return None, None, sector_reason
 
-    if _next_earnings_within(t, PREFILTER_MIN_DAYS_TO_EARNINGS) is True:
-        return None, None, f"earnings within {PREFILTER_MIN_DAYS_TO_EARNINGS}d"
+    solvency_ok, solvency_reason = _solvency_admits(info, ticker)
+    if not solvency_ok:
+        return None, None, solvency_reason
 
+    # NOTE: earnings proximity is no longer gated here on a fixed 14-day window. It is enforced
+    # per-expiration in `_score_options` (Fix 1), comparing the next earnings date to the actual
+    # option expiration and failing closed when earnings data is unavailable.
     return t, info, None
 
 
@@ -206,6 +278,9 @@ def _score_options(
     candidates: list[Candidate] = []
     best_miss: NearMiss | None = None
 
+    # Fix 1: resolve the next earnings date once. None ⇒ unknown ⇒ every expiration fails closed.
+    earnings_date = _next_earnings_date(t)
+
     try:
         expiries = t.options
     except Exception as e:
@@ -218,6 +293,13 @@ def _score_options(
             continue
         dte = (exp_date - today).days
         if not (TARGET_DTE_MIN <= dte <= TARGET_DTE_MAX):
+            continue
+
+        # Fix 1: exclude this expiration if earnings land within its life (or are unknown).
+        earnings_ok, earnings_reason = _earnings_admits(earnings_date, exp_date)
+        if not earnings_ok:
+            if best_miss is None:
+                best_miss = NearMiss(ticker, is_priority, earnings_reason)
             continue
 
         try:
@@ -294,6 +376,10 @@ def _score_options(
                 premium=mid,
                 dte=dte,
                 annualized=annualized,
+                cushion_pct=cushion,
+                oi=oi,
+                spread_pct=spread_pct,
+                premium_pct_of_strike=(mid / strike) * 100,
             ))
 
     return candidates, best_miss
@@ -342,8 +428,9 @@ def run() -> None:
             except Exception as e:
                 log.warning("Scan failed for %s: %s", ticker, e)
 
-    # Priority hits float to top, then sort by annualized return.
-    all_candidates.sort(key=lambda c: (not c.is_priority, -c.score))
+    # Fix 3: priority hits still float to top (is_priority ordering preserved), then sort by the
+    # risk-adjusted score (mesa.scoring blend), with annualized yield as the tiebreaker.
+    all_candidates.sort(key=lambda c: (not c.is_priority, -c.score, -c.annualized))
     top_picks = all_candidates[:TOP_N]
 
     if top_picks:

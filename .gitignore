@@ -7,3 +7,6 @@ build/
 .venv/
 logs/
 mesa/data/
+# macOS AppleDouble metadata files
+._*
+.DS_Store
