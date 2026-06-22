@@ -18,7 +18,7 @@ from mesa.market_data import get_ticker_data, get_options_chain, get_expirations
 
 log = logging.getLogger(__name__)
 
-# Priority watchlist (quality companies, $90-$110 sweet spot)
+# Priority watchlist (quality companies, $50-$110 sweet spot)
 PRIORITY_WATCHLIST = [
     "JPM", "ABBV", "KO", "DDOG", "MSFT", "AAPL", "AMZN",
     "GOOGL", "META", "V", "MA", "UNH", "PG", "JNJ",
@@ -35,11 +35,11 @@ FALLBACK_WATCHLIST = [
 CRYPTO_EXCLUSION = {"MARA", "RIOT", "COIN", "MSTR", "CLSK", "HOOD"}
 ACCOUNTING_ISSUES = set()
 
-# Price constraints (wheel strategy: $90-$110 sweet spot)
-MIN_STOCK_PRICE = 90.0
+# Price constraints from SCREENING_STRATEGY.md.
+MIN_STOCK_PRICE = 50.0
 MAX_STOCK_PRICE = 110.0
 MIN_STOCK_PRICE_WIDE = 50.0
-MAX_STOCK_PRICE_WIDE = 200.0
+MAX_STOCK_PRICE_WIDE = 110.0
 MIN_MARKET_CAP = 1e10
 
 MIN_ANNUALIZED_RETURN = 0.15
@@ -66,10 +66,25 @@ def parse_criteria(msg: str) -> Optional[dict]:
         "limit": 3,
     }
     
-    # Price range: default $90-$110, or /scan wide for $50-$200
+    # Price range: default $50-$110, with natural-language overrides.
     if "wide" in msg_lower:
         criteria["price_min"] = MIN_STOCK_PRICE_WIDE
         criteria["price_max"] = MAX_STOCK_PRICE_WIDE
+
+    between_match = re.search(r'between\s*\$?(\d+(?:\.\d+)?)\s*(?:and|-)\s*\$?(\d+(?:\.\d+)?)', msg_lower)
+    if between_match:
+        low = float(between_match.group(1))
+        high = float(between_match.group(2))
+        criteria["price_min"] = min(low, high)
+        criteria["price_max"] = max(low, high)
+
+    under_match = re.search(r'(?:under|below|less than)\s*\$?(\d+(?:\.\d+)?)', msg_lower)
+    if under_match:
+        criteria["price_max"] = float(under_match.group(1))
+
+    over_match = re.search(r'(?:over|above|more than)\s*\$?(\d+(?:\.\d+)?)', msg_lower)
+    if over_match:
+        criteria["price_min"] = float(over_match.group(1))
     
     # User-specified tickers (check XYZAB format)
     ticker_matches = re.findall(r'\b([A-Z]{1,5})\b', msg)
@@ -90,7 +105,12 @@ def parse_criteria(msg: str) -> Optional[dict]:
     return criteria
 
 
-def scan_ticker(ticker: str, today: date, price_max: float = MAX_STOCK_PRICE) -> Optional[dict]:
+def scan_ticker(
+    ticker: str,
+    today: date,
+    price_min: float = MIN_STOCK_PRICE,
+    price_max: float = MAX_STOCK_PRICE,
+) -> Optional[dict]:
     """Scan single ticker for CSP opportunities with retry logic."""
     
     # EXCLUSION FILTERS
@@ -112,8 +132,8 @@ def scan_ticker(ticker: str, today: date, price_max: float = MAX_STOCK_PRICE) ->
     market_cap = data['market_cap']
     
     # Price range filter
-    if price < MIN_STOCK_PRICE:
-        log.debug(f"Skipping {ticker}: ${price:.2f} < ${MIN_STOCK_PRICE}")
+    if price < price_min:
+        log.debug(f"Skipping {ticker}: ${price:.2f} < ${price_min}")
         return None
     
     if price > price_max:
@@ -188,13 +208,19 @@ def scan_ticker(ticker: str, today: date, price_max: float = MAX_STOCK_PRICE) ->
                     breakeven = strike - mid
                     cushion_pct = (price - breakeven) / price
                     
+                    # Extract delta and premium pct
+                    delta = abs(float(row.get("delta", 0) or 0))
+                    premium_pct_of_strike = (mid / strike) * 100
+                    
                     hit = {
                         "ticker": ticker,
                         "price": price,
                         "strike": strike,
                         "expiry": exp_str,
                         "dte": dte,
+                        "delta": delta,
                         "premium_per_contract": premium_per_contract,
+                        "premium_pct_of_strike": premium_pct_of_strike,
                         "annualized": annualized,
                         "breakeven": breakeven,
                         "cushion_pct": cushion_pct,
@@ -221,6 +247,7 @@ def screen(criteria: dict) -> list:
     """Screen tickers and return candidates."""
     today = date.today()
     results = []
+    price_min = criteria.get("price_min", MIN_STOCK_PRICE)
     price_max = criteria.get("price_max", MAX_STOCK_PRICE)
     
     # User-specified tickers
@@ -232,7 +259,7 @@ def screen(criteria: dict) -> list:
         log.info("Screening priority watchlist...")
     
     for ticker in tickers_to_scan:
-        hit = scan_ticker(ticker, today, price_max)
+        hit = scan_ticker(ticker, today, price_min, price_max)
         if hit:
             results.append(hit)
     
@@ -240,7 +267,7 @@ def screen(criteria: dict) -> list:
     if not results and not criteria["watchlist"]:
         log.info("Expanding to fallback watchlist...")
         for ticker in FALLBACK_WATCHLIST:
-            hit = scan_ticker(ticker, today, price_max)
+            hit = scan_ticker(ticker, today, price_min, price_max)
             if hit:
                 results.append(hit)
     
@@ -283,7 +310,9 @@ def handle_message(message: str) -> None:
                 strike=r["strike"],
                 expiry=r["expiry"],
                 dte=r["dte"],
+                delta=r["delta"],
                 premium=r["premium_per_contract"],
+                premium_pct_of_strike=r["premium_pct_of_strike"],
                 annualized=r["annualized"],
                 breakeven=r["breakeven"],
                 cushion_pct=r["cushion_pct"],

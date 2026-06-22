@@ -18,11 +18,11 @@ log = logging.getLogger(__name__)
 # Constants
 CRYPTO_EXCLUSION = {"MARA", "RIOT", "COIN", "MSTR", "CLSK", "HOOD"}
 ACCOUNTING_ISSUES = set()
-MIN_STOCK_PRICE = 80.0
-MAX_STOCK_PRICE = 140.0
+MIN_STOCK_PRICE = 50.0
+MAX_STOCK_PRICE = 110.0
 MIN_MARKET_CAP = 1e10  # $10B
-MIN_IV = 0.35
-MAX_IV = 0.65
+MIN_IV = 0.0
+MAX_IV = 1.50
 MIN_DAYS_TO_EARNINGS = 14
 
 
@@ -96,7 +96,7 @@ class Candidate:
         
         if self.price < MIN_STOCK_PRICE or self.price > MAX_STOCK_PRICE:
             self.color = "🔴"
-            self.reason = f"price ${self.price:.0f} outside ${MIN_STOCK_PRICE}-${MAX_STOCK_PRICE} range"
+            self.reason = f"price ${self.price:.0f} outside ${MIN_STOCK_PRICE:.0f}-${MAX_STOCK_PRICE:.0f} range (max ~$10k security)"
             self.score = 0
             return
         
@@ -118,23 +118,24 @@ class Candidate:
         if self.days_to_earnings and self.days_to_earnings < MIN_DAYS_TO_EARNINGS:
             yellow_flags.append(f"earnings in {self.days_to_earnings}d")
         
-        if self.dte < 25 or self.dte > 45:
-            yellow_flags.append(f"DTE {self.dte}d outside 25-45d")
-        
-        if self.delta < 0.20 or self.delta > 0.30:
-            yellow_flags.append(f"delta {self.delta:.2f} outside 0.20-0.30")
-        
+        if self.dte < 30 or self.dte > 60:
+            yellow_flags.append(f"DTE {self.dte}d outside 30-60d")
+
+        # Delta check (optional - only if yfinance provides it)
+        if self.delta > 0 and (self.delta < 0.20 or self.delta > 0.35):
+            yellow_flags.append(f"delta {self.delta:.2f} outside 0.20-0.35")
+
         if self.cushion_pct < 0.08:
             yellow_flags.append(f"cushion {self.cushion_pct:.1%} < 8%")
         
         if self.premium_pct_of_strike < 1.0:
             yellow_flags.append(f"premium {self.premium_pct_of_strike:.2f}% < 1.0% of strike")
         
-        if self.oi < 500:
-            yellow_flags.append(f"OI {self.oi} < 500")
-        
-        if self.spread_pct > 0.05:
-            yellow_flags.append(f"spread {self.spread_pct:.1%} > 5%")
+        if self.oi < 100:
+            yellow_flags.append(f"OI {self.oi} < 100")
+
+        if self.spread_pct > 0.20:
+            yellow_flags.append(f"spread {self.spread_pct:.1%} > 20%")
         
         if yellow_flags:
             self.color = "🟡"

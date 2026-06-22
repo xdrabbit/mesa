@@ -1,10 +1,10 @@
-"""Prospector agent — scans S&P 500 + Nasdaq 100 for covered call opportunities.
+"""Prospector agent — scans S&P 500 + Nasdaq 100 for cash-secured put opportunities.
 
 Pipeline:
   1. Load priority watchlist (20 hand-picked tickers, marked ⭐ in output).
   2. Load full universe (S&P 500 ∪ Nasdaq 100) from cached Wikipedia data.
-  3. Pre-filter via yfinance .info: price band, market cap, sector, country, earnings.
-  4. Score remaining option chains: IV, DTE, delta, premium, liquidity, cushion.
+  3. Pre-filter via yfinance .info: price band ($50–$110), market cap, sector, country, earnings.
+  4. Score remaining put chains: IV, DTE, delta, premium, liquidity, cushion.
   5. Emit top 5 picks via Telegram. If zero pass, surface top 3 nearest misses.
 
 Open positions are loaded live from positions.json (mesa.models.load_positions),
@@ -33,8 +33,8 @@ WATCHLIST = [
 ]
 
 # --- Pre-filter (cheap pass, .info only) ---
-PREFILTER_MIN_PRICE = 10.0
-PREFILTER_MAX_PRICE = 200.0
+PREFILTER_MIN_PRICE = 50.0
+PREFILTER_MAX_PRICE = 110.0
 PREFILTER_MIN_MARKET_CAP = 1e10  # $10B
 PREFILTER_MIN_DAYS_TO_EARNINGS = 14
 
@@ -48,23 +48,23 @@ EXCLUDED_INDUSTRY_KEYWORDS = (
 )
 
 # --- Scoring (full options pull) ---
-SCAN_MIN_PRICE = 70.0
-SCAN_MAX_PRICE = 120.0  # ~$10K per-position capital limit (100 shares × $120 ≈ $12K wheel ceiling)
-MIN_IV = 0.35
-MAX_IV = 0.65
-TARGET_DTE_MIN = 25
-TARGET_DTE_MAX = 45
+SCAN_MIN_PRICE = 50.0
+SCAN_MAX_PRICE = 110.0  # Wheel strategy capital range from SCREENING_STRATEGY.md.
+MIN_IV = 0.0
+MAX_IV = 1.50
+TARGET_DTE_MIN = 30
+TARGET_DTE_MAX = 60
 TARGET_DELTA_MIN = 0.20
-TARGET_DELTA_MAX = 0.30
+TARGET_DELTA_MAX = 0.35
 MIN_PREMIUM_PCT_OF_STRIKE = 0.01
-MIN_OPEN_INTEREST = 500
-MAX_BID_ASK_SPREAD_PCT = 0.05
+MIN_OPEN_INTEREST = 100
+MAX_BID_ASK_SPREAD_PCT = 0.20
 
 # Tier thresholds: priority watchlist gets relaxed credit/cushion, others stricter.
-CORE_MIN_CREDIT = 2.00
-CORE_MIN_CUSHION = 0.08
-NON_CORE_MIN_CREDIT = 2.50
-NON_CORE_MIN_CUSHION = 0.08
+CORE_MIN_CREDIT = 0.0
+CORE_MIN_CUSHION = 0.05
+NON_CORE_MIN_CREDIT = 0.0
+NON_CORE_MIN_CUSHION = 0.05
 
 MAX_WORKERS = 10
 TOP_N = 5
@@ -225,15 +225,15 @@ def _score_options(
         except Exception:
             continue
 
-        for _, row in chain.calls.iterrows():
+        for _, row in chain.puts.iterrows():
             try:
                 strike = float(row.get("strike", 0))
             except (ValueError, TypeError):
                 continue
-            if strike <= price:
+            if strike >= price:
                 continue
 
-            cushion = (strike - price) / price
+            cushion = (price - strike) / price
             if cushion < tier_cushion:
                 continue
 
@@ -253,7 +253,7 @@ def _score_options(
             delta_raw = row.get("delta")
             if delta_raw is not None and delta_raw == delta_raw:  # NaN-safe
                 try:
-                    delta = float(delta_raw)
+                    delta = abs(float(delta_raw))
                     if not (TARGET_DELTA_MIN <= delta <= TARGET_DELTA_MAX):
                         continue
                 except (ValueError, TypeError):
@@ -283,7 +283,7 @@ def _score_options(
             if (mid / strike) < MIN_PREMIUM_PCT_OF_STRIKE:
                 continue
 
-            annualized = (mid / price) * (365 / dte) if dte > 0 else 0.0
+            annualized = (mid / strike) * (365 / dte) if dte > 0 else 0.0
 
             candidates.append(Candidate(
                 ticker=ticker,
