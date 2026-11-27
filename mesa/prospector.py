@@ -87,7 +87,13 @@ CORE_MIN_CUSHION = 0.05
 NON_CORE_MIN_CREDIT = 0.0
 NON_CORE_MIN_CUSHION = 0.05
 
-NO_QUOTE_REASON = "no live bid/ask (market closed?)"
+NO_QUOTE_REASON = "no live bid/ask on any strike in range (market closed?)"
+DATA_ERROR_CHAIN = "option chain unavailable (rate-limited?)"
+# Reasons that mean "Yahoo failed us", not "the ticker failed the screen" — tallied so a throttled
+# scan says so instead of quietly returning fewer picks.
+_DATA_ERROR_PREFIXES = ("yfinance error", "yfinance returned incomplete", "no option chain", DATA_ERROR_CHAIN)
+DATA_ERROR_NOTE_MIN = 3  # ...and at least this share (below) of the scan, so one flaky ticker is silent
+DATA_ERROR_NOTE_SHARE = 0.03
 RISK_FREE_RATE = 0.04  # for the Black-Scholes delta estimate; yfinance chains carry no greeks.
 
 MAX_WORKERS = 10
@@ -259,17 +265,35 @@ def _warm_up() -> None:
         log.debug("yfinance warm-up failed: %s", e)
 
 
-def _fetch_info(t: yf.Ticker, attempts: int = 3) -> dict:
-    """`.info` with a short backoff; Yahoo rate-limits bursts and the error is transient."""
-    last: Exception | None = None
+def _info_is_stub(info: dict) -> bool:
+    return not (info.get("marketCap") or info.get("currentPrice") or info.get("regularMarketPrice"))
+
+
+def _fetch_info(ticker: str, attempts: int = 4) -> tuple[yf.Ticker, dict]:
+    """(Ticker, .info) with retries.
+
+    Under parallel load Yahoo answers ~1 in 3 `.info` calls with a one-key stub
+    (`{'trailingPegRatio': None}`) instead of an error, which would silently drop the ticker as
+    "no market cap data". Treat a stub like an error: back off and retry on a *fresh* Ticker,
+    because yfinance can cache the stub on the instance.
+    """
+    last_exc: Exception | None = None
+    stub: tuple[yf.Ticker, dict] | None = None
     for i in range(attempts):
+        t = yf.Ticker(ticker)
         try:
-            return t.info or {}
+            info = t.info or {}
         except Exception as e:
-            last = e
-            if i < attempts - 1:
-                time.sleep(0.75 * (i + 1))
-    raise last  # type: ignore[misc]
+            last_exc = e
+        else:
+            if not _info_is_stub(info):
+                return t, info
+            stub, last_exc = (t, info), None
+        if i < attempts - 1:
+            time.sleep(0.75 * (i + 1))
+    if last_exc is not None:
+        raise last_exc
+    return stub  # type: ignore[return-value]
 
 
 def _prefilter(
@@ -280,8 +304,7 @@ def _prefilter(
         return None, None, "leveraged/crypto/volatility ticker"
 
     try:
-        t = yf.Ticker(ticker)
-        info = _fetch_info(t)
+        t, info = _fetch_info(ticker)
     except Exception as e:
         return None, None, f"yfinance error: {e}"
 
@@ -291,6 +314,8 @@ def _prefilter(
 
     market_cap = info.get("marketCap")
     if not market_cap:
+        if _info_is_stub(info):
+            return None, None, "yfinance returned incomplete data (rate-limited?)"
         return None, None, "no market cap data"
     if market_cap < PREFILTER_MIN_MARKET_CAP:
         return None, None, f"cap ${market_cap / 1e9:.1f}B < $10B"
@@ -352,6 +377,8 @@ def _score_options(
     # Why rows were rejected, tallied so the near-miss names the *dominant* blocker rather than
     # whichever row happened to come first.
     row_misses: Counter[str] = Counter()
+    live_rows = dead_rows = 0  # rows with / without a bid+ask, among strikes that passed the cushion test
+    chain_errors = 0
     earnings_miss: str | None = None
     expiries_in_window = 0
 
@@ -381,7 +408,9 @@ def _score_options(
 
         try:
             chain = t.option_chain(exp_str)
-        except Exception:
+        except Exception as e:
+            log.debug("%s %s: option chain fetch failed: %s", ticker, exp_str, e)
+            chain_errors += 1
             continue
 
         for _, row in chain.puts.iterrows():
@@ -405,8 +434,11 @@ def _score_options(
             except (ValueError, TypeError):
                 continue
             if bid <= 0 or ask <= 0:
-                row_misses[NO_QUOTE_REASON] += 1
+                # Deep-OTM strikes routinely have no bid even in an open market, so a dead row is
+                # only "market closed" if *every* row is dead (decided after the loop).
+                dead_rows += 1
                 continue
+            live_rows += 1
 
             try:
                 iv = float(row.get("impliedVolatility", 0) or 0)
@@ -474,6 +506,10 @@ def _score_options(
         return candidates, None
     if row_misses:
         return [], NearMiss(ticker, is_priority, row_misses.most_common(1)[0][0])
+    if dead_rows and not live_rows:
+        return [], NearMiss(ticker, is_priority, NO_QUOTE_REASON)
+    if chain_errors and not live_rows:
+        return [], NearMiss(ticker, is_priority, DATA_ERROR_CHAIN)
     if earnings_miss:
         return [], NearMiss(ticker, is_priority, earnings_miss)
     if expiries_in_window == 0:
@@ -485,6 +521,7 @@ class _Outcome(NamedTuple):
     candidates: list[Candidate]
     miss: NearMiss | None
     passed_prefilter: bool
+    data_error: bool = False  # Yahoo failed (rate limit / stub / chain error) — not a screening result
 
 
 def _scan_one(
@@ -499,9 +536,12 @@ def _scan_one(
     t, info, reject = _prefilter(ticker, params)
     if reject:
         log.debug("%s rejected: %s", ticker, reject)
-        return _Outcome([], NearMiss(ticker, is_priority, reject) if explain else None, False)
+        return _Outcome(
+            [], NearMiss(ticker, is_priority, reject) if explain else None, False,
+            data_error=reject.startswith(_DATA_ERROR_PREFIXES),
+        )
     cands, miss = _score_options(t, info, ticker, is_priority, today, params)
-    return _Outcome(cands, miss, True)
+    return _Outcome(cands, miss, True, data_error=bool(miss and miss.reason.startswith(_DATA_ERROR_PREFIXES)))
 
 
 @dataclass
@@ -511,6 +551,7 @@ class ScanResult:
     scanned: int
     prefiltered: list[str]  # tickers that passed the cheap prefilter (→ bot shortlist)
     notes: list[str] = field(default_factory=list)
+    data_errors: list[str] = field(default_factory=list)  # tickers Yahoo failed to serve
 
 
 def _rank_key(c: Candidate) -> tuple:
@@ -533,6 +574,7 @@ def scan(
     all_candidates: list[Candidate] = []
     all_misses: list[NearMiss] = []
     prefiltered: list[str] = []
+    data_errors: list[str] = []
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_scan_one, t, p, today, params, explain): t for t, p in targets}
@@ -546,6 +588,8 @@ def scan(
                     all_misses.append(NearMiss(ticker, False, f"scan error: {e}"))
                 continue
             all_candidates.extend(outcome.candidates)
+            if outcome.data_error:
+                data_errors.append(ticker)
             if outcome.miss:
                 all_misses.append(outcome.miss)
             if outcome.passed_prefilter:
@@ -558,9 +602,15 @@ def scan(
     ranked = sorted(best.values(), key=_rank_key)
     all_misses.sort(key=lambda m: (not m.is_priority, m.ticker))
 
-    result = ScanResult(ranked, all_misses, len(targets), sorted(prefiltered))
+    result = ScanResult(ranked, all_misses, len(targets), sorted(prefiltered), data_errors=sorted(data_errors))
+    if len(data_errors) >= max(DATA_ERROR_NOTE_MIN, DATA_ERROR_NOTE_SHARE * len(targets)):
+        result.notes.append(
+            f"⚠️ Yahoo failed to return data for {len(data_errors)} of {len(targets)} tickers "
+            "(rate limit?) — results may be incomplete. Try again in a few minutes."
+        )
+    # A real pick needs a live bid/ask, so the market is evidently open if any exist.
     dead_quotes = sum(1 for m in all_misses if m.reason == NO_QUOTE_REASON)
-    if dead_quotes and dead_quotes >= max(1, len(prefiltered) // 2):
+    if not ranked and dead_quotes and dead_quotes >= max(1, len(prefiltered) // 2):
         result.notes.append(
             "⚠️ Options quotes are empty — the market is probably closed, so results are "
             "unreliable. Scan Mon–Fri 9:30–16:00 ET."

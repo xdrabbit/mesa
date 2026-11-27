@@ -47,6 +47,23 @@ class ScoreOptionsTest(unittest.TestCase):
         self.assertEqual(cands, [])
         self.assertEqual(miss.reason, P.NO_QUOTE_REASON)
 
+    def test_zero_bid_strikes_in_an_open_market_are_not_called_market_closed(self) -> None:
+        # Live-validation regression: far-OTM strikes often have no bid while the market is open.
+        # With one live row the real blocker (OI here) must be named, not "market closed".
+        rows = [put_row(94.0, oi=10), put_row(88.0, bid=0.0, ask=0.0), put_row(87.0, bid=0.0, ask=0.0),
+                put_row(86.0, bid=0.0, ask=0.0)]
+        _, miss = P._score_options(make_ticker(rows), INFO, "TEST", True, TODAY)
+        self.assertEqual(miss.reason, f"open interest under {P.MIN_OPEN_INTEREST}")
+
+    def test_chain_fetch_failures_are_reported_not_swallowed(self) -> None:
+        def boom(_):
+            raise RuntimeError("429")
+
+        t = make_ticker([])
+        t.option_chain = boom
+        cands, miss = P._score_options(t, INFO, "TEST", True, TODAY)
+        self.assertEqual((cands, miss.reason), ([], P.DATA_ERROR_CHAIN))
+
     def test_min_iv_param(self) -> None:
         t = make_ticker([put_row(94.0, iv=0.35)])
         loose, _ = P._score_options(t, INFO, "TEST", True, TODAY, P.ScanParams(min_iv=0.30))
@@ -104,6 +121,38 @@ class PrefilterTest(unittest.TestCase):
         self.assertEqual(calls["n"], 3)
 
 
+class InfoStubTest(unittest.TestCase):
+    """Yahoo answers ~1 in 3 parallel `.info` calls with {'trailingPegRatio': None}."""
+
+    GOOD = {"marketCap": 5e10, "currentPrice": 80.0, "sector": "Technology"}
+
+    def test_stub_is_retried_on_a_fresh_ticker(self) -> None:
+        made = []
+
+        def fake_ticker(symbol):
+            obj = SimpleNamespace(info={"trailingPegRatio": None} if len(made) < 2 else self.GOOD)
+            made.append(obj)
+            return obj
+
+        with patch.object(P.yf, "Ticker", side_effect=fake_ticker), patch.object(P.time, "sleep"):
+            t, _, reason = P._prefilter("KO")
+        self.assertIsNone(reason)
+        self.assertEqual(len(made), 3)  # a new Ticker each attempt
+        self.assertIs(t, made[-1])
+
+    def test_persistent_stub_is_reported_as_incomplete_not_as_missing_cap(self) -> None:
+        stub = SimpleNamespace(info={"trailingPegRatio": None})
+        with patch.object(P.yf, "Ticker", return_value=stub), patch.object(P.time, "sleep"):
+            _, _, reason = P._prefilter("KO")
+        self.assertIn("incomplete data", reason)
+
+    def test_genuinely_missing_cap_keeps_its_own_reason(self) -> None:
+        odd = SimpleNamespace(info={"currentPrice": 80.0, "country": "United States"})
+        with patch.object(P.yf, "Ticker", return_value=odd), patch.object(P.time, "sleep"):
+            _, _, reason = P._prefilter("ODD")
+        self.assertEqual(reason, "no market cap data")
+
+
 def _cand(ticker: str, strike: float, cushion: float, priority: bool = False) -> P.Candidate:
     return P.Candidate(
         ticker=ticker, is_priority=priority, price=100.0, iv=0.35, strike=strike, premium=2.0,
@@ -157,6 +206,36 @@ class ScanTest(unittest.TestCase):
         miss = lambda t: P._Outcome([], P.NearMiss(t, False, P.NO_QUOTE_REASON), True)  # noqa: E731
         res = self._scan({"A": miss("A"), "B": miss("B")}, [("A", False), ("B", False)])
         self.assertTrue(any("market is probably closed" in n for n in res.notes))
+
+    def test_throttled_scan_says_so_instead_of_returning_quietly_fewer_picks(self) -> None:
+        # Live validation: a rate-limited run dropped ~30 of 517 tickers and still said "517 scanned".
+        bad = P._Outcome([], None, False, data_error=True)
+        outcomes = {f"T{i}": bad for i in range(10)} | {"OK": P._Outcome([_cand("OK", 94, 0.06)], None, True)}
+        res = self._scan(outcomes, [(t, False) for t in outcomes])
+        self.assertEqual(len(res.data_errors), 10)
+        self.assertTrue(any("10 of 11 tickers" in n for n in res.notes))
+
+    def test_a_single_flaky_ticker_is_not_worth_a_warning(self) -> None:
+        outcomes = {f"T{i}": P._Outcome([_cand(f"T{i}", 94, 0.06)], None, True) for i in range(100)}
+        outcomes["BAD"] = P._Outcome([], None, False, data_error=True)
+        res = self._scan(outcomes, [(t, False) for t in outcomes])
+        self.assertEqual(res.data_errors, ["BAD"])
+        self.assertEqual(res.notes, [])
+
+    def test_scan_one_flags_yahoo_failures_but_not_screening_rejections(self) -> None:
+        with patch.object(P, "_prefilter", return_value=(None, None, "yfinance returned incomplete data (rate-limited?)")):
+            self.assertTrue(P._scan_one("A", False, TODAY).data_error)
+        with patch.object(P, "_prefilter", return_value=(None, None, "price $300.00 outside $50-$110")):
+            self.assertFalse(P._scan_one("A", False, TODAY).data_error)
+
+    def test_no_closed_note_when_real_picks_exist(self) -> None:
+        # A pick needs a live bid/ask, so the market is open — even if most tickers had dead rows.
+        dead = lambda t: P._Outcome([], P.NearMiss(t, False, P.NO_QUOTE_REASON), True)  # noqa: E731
+        outcomes = {"A": dead("A"), "B": dead("B"), "C": dead("C"),
+                    "OK": P._Outcome([_cand("OK", 94, 0.06)], None, True)}
+        res = self._scan(outcomes, [(t, False) for t in outcomes])
+        self.assertEqual([c.ticker for c in res.candidates], ["OK"])
+        self.assertEqual(res.notes, [])
 
 
 class ReportTest(unittest.TestCase):
