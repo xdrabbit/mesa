@@ -117,8 +117,11 @@ def _check(pos: Position) -> tuple[list[str], str]:
         df = chain["puts"] if pos.direction == "put" else chain["calls"]
         row = df[df["strike"] == pos.strike]
         if not row.empty:
-            mid = (float(row["bid"].iloc[0]) + float(row["ask"].iloc[0])) / 2
-            current_value = mid * 100 * pos.contracts
+            bid, ask = float(row["bid"].iloc[0]), float(row["ask"].iloc[0])
+            # bid=ask=0 means no live quote (market closed): the "mid" would be $0 and fire a
+            # bogus "close for profit" alert on every off-hours run.
+            current_value = None if bid <= 0 or ask <= 0 else ((bid + ask) / 2) * 100 * pos.contracts
+        if current_value is not None:
             if current_value < pos.premium_collected * CLOSE_THRESHOLD:
                 alerts.append(
                     f"💰 *{label}*\n"

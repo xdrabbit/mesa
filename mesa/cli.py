@@ -3,9 +3,9 @@
 Usage:
     mesa watchdog              — silent check, alerts only on triggers
     mesa watchdog --summary    — full position report (Sunday)
-    mesa prospector            — scan for new put-selling opportunities
-    mesa screen <CRITERIA>     — conversational screening (e.g. "under $50" "high IV")
-    mesa bot                   — Telegram webhook bot (polling mode)
+    mesa prospector            — scan S&P 500 + Nasdaq 100 for cash-secured puts, send to Telegram
+    mesa screen <CRITERIA>     — same engine, printed here (e.g. "under 80" "check DDOG" "scan all")
+    mesa bot                   — Telegram bot (polling mode; answers TELEGRAM_CHAT_ID only)
     mesa status                — print current positions to stdout
 """
 from __future__ import annotations
@@ -52,16 +52,17 @@ def main() -> None:
         if not args.criteria:
             print("Usage: mesa screen <criteria>")
             print("Examples:")
-            print("  mesa screen under 50")
-            print("  mesa screen between 30 and 80")
-            print("  mesa screen DDOG NFLX")
+            print("  mesa screen under 80")
+            print("  mesa screen between 60 and 90")
+            print("  mesa screen check DDOG NFLX")
+            print("  mesa screen top 5 high IV")
+            print("  mesa screen scan all")
             sys.exit(1)
-        from mesa.conversational import handle_message
-        handle_message(" ".join(args.criteria))
+        from mesa.conversational import respond
+        print(respond(" ".join(args.criteria)))
     elif args.command == "bot":
-        import asyncio
-        from mesa.webhook import main
-        asyncio.run(main())
+        from mesa.webhook import main as run_bot
+        run_bot()
     elif args.command == "status":
         _status()
 

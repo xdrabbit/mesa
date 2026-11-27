@@ -28,7 +28,7 @@ sys.modules.setdefault("yfinance", SimpleNamespace(Ticker=object))
 sys.modules.setdefault("telegram", SimpleNamespace(Bot=object))
 sys.modules.setdefault("mesa.telegram_send", SimpleNamespace(send=lambda message: None))
 sys.modules.setdefault("mesa.models", SimpleNamespace(load_positions=lambda: []))
-sys.modules.setdefault("mesa.universe", SimpleNamespace(load_universe=lambda: []))
+sys.modules.setdefault("mesa.universe", SimpleNamespace(load_universe=lambda: [], save_shortlist=lambda t: None, load_shortlist=lambda: []))
 
 from mesa import prospector  # noqa: E402
 from mesa.scoring import risk_score  # noqa: E402
