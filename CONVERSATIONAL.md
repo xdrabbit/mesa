@@ -1,206 +1,93 @@
-# Mesa Conversational Agent
+# Mesa Telegram bot
 
-Mesa now supports **real-time Telegram conversations** for prospector screening, not just cron jobs.
+Ask Mesa for wheel-strategy put ideas from Telegram, in plain English. The bot is a thin front end
+over the same engine the cron job uses (`mesa/prospector.py`), so every gate in
+`SCREENING_STRATEGY.md` — including the earnings and solvency checks — applies to chat answers too.
 
-## Quick Start
+## What you can say
 
-### Run the bot (polling mode)
-```bash
-cd ~/blackbird_dev/mesa
-.venv/bin/python -c "from mesa.cli import main; import sys; sys.argv = ['mesa', 'bot']; main()"
+| You type | What happens |
+|---|---|
+| `scan` | Best puts from the latest **shortlist** (fast, ~seconds) |
+| `scan all` | Rescans the full S&P 500 + Nasdaq 100 and **rebuilds the shortlist** (a few minutes) |
+| `check DDOG NFLX` / `check ddog nflx` / `how's JPM` | Just those tickers; tickers that don't qualify get a reason |
+| `top 5 under $80` | Up to 5 picks, price ceiling $80 |
+| `between $60 and $90`, `$60 to $90` | Price band |
+| `over $150`, `under 30` | An explicit bound replaces the matching default ($50–$110) |
+| `IV above 45%`, `iv 0.45`, `high iv` | Minimum implied volatility (`high iv` = 40%) |
+| anything else | Help text |
+
+Defaults: price $50–$110, 3 picks (max 10). **Earnings inside the option's life are always excluded** —
+there is no switch to turn that off.
+
+Each pick shows what you need to place the trade (illustrative numbers):
+
+```
+1. KO $97.59 — sell 2027-01-15 $90 put (49d, Δ0.24)
+   $1.45 credit · 1.6% of strike · 13% ann. · cushion 8% · IV 28% · OI 1,204 · score 61/100
 ```
 
-Or use the wrapper:
-```bash
-./run-bot.sh
+## How it fits together
+
+```
+Telegram ──► mesa/webhook.py ──► mesa/conversational.py ──► mesa/prospector.py (shared engine)
+ (polling)    auth + threading     parse text → ScanParams     prefilter → option chains → gates → rank
+                                                                      │
+cron ──► mesa prospector ─────────────────────────────────────────────┘ ──► mesa/data/shortlist.json
 ```
 
-### Or, run a single screening query
+- **Shortlist** (`mesa/data/shortlist.json`, git-ignored): tickers that passed the cheap prefilter on
+  the last full scan (cron or `scan all`), valid for 3 days. Most large caps trade well above $110, so
+  scanning only a hand-picked list would nearly always return nothing.
+- **Access control:** only the chat whose id equals `TELEGRAM_CHAT_ID` is answered; all others are
+  ignored (and logged). The bot refuses to start without a chat id.
+- **One scan at a time**; a second request gets "already running". Scans run in a worker thread so the
+  bot stays responsive.
+- **Market hours matter.** Yahoo returns empty option quotes outside 9:30–16:00 ET; Mesa then replies
+  with a "market closed" note instead of a misleading "nothing qualifies".
+
+## Setup
+
 ```bash
-mesa screen under 50
-mesa screen between 30 and 80
-mesa screen check DDOG NFLX
-mesa screen top 5 with IV above 40%
+cp .env.example .env     # fill in TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID
+pip install -e ".[dev]"
+mesa bot                 # or ./run-bot.sh
 ```
 
-## Features
+**Secrets belong in `.env` only** (git-ignored). This repository is public — never paste a token into
+a doc, issue or commit. To rotate a token: @BotFather → `/mybots` → your bot → API Token → Revoke,
+update `.env`, restart the bot.
 
-### Natural Language Parsing
-The bot recognizes:
-- **Intents:** "find", "screen", "show me", "prospects", "what about", "check"
-- **Price ranges:** "under $50", "between $30 and $80", "$50 to $100"
-- **IV thresholds:** "IV above 40%", "high IV"
-- **Specific tickers:** "check DDOG NFLX", "how's JPM"
-- **Earnings filter:** "no earnings", "skip earnings"
-- **Limits:** "top 5", "best 3"
+Find your chat id: send your bot any message, then open
+`https://api.telegram.org/bot<TOKEN>/getUpdates` and read `"chat":{"id": ...}`.
 
-### Screening Criteria
-Each screen returns:
-- **Ticker** — Stock symbol
-- **Current Price** — Latest close
-- **Strike & Expiry** — Put strike + expiration date
-- **DTE** — Days to expiration (30-60 day window)
-- **Premium** — Annualized return on capital
-- **Breakeven** — Downside protection level
-- **Cushion** — Margin of safety below current price
-- **Open Interest** — Contract liquidity (min 100)
-- **Bid-Ask Spread** — Tightness (max 20%)
+## Running it
 
-### Cron Jobs Still Work
-The Sunday runs are unchanged:
-- **5 PM MT:** Prospector scan (daily opportunities)
-- **6 PM MT:** Watchdog summary (position report)
-
-## Architecture
-
-### New Files
-- `mesa/conversational.py` — Natural language parsing + screening logic
-- `mesa/webhook.py` — Telegram bot handler (polling mode)
-- `run-bot.sh` — Service wrapper script
-- `mesa-bot.service` — Systemd service file
-
-### Integration
-- Uses existing `mesa/telegram.py` for message sending
-- Uses existing `yfinance` for market data
-- Builds on current watchlist + wheel strategy constraints
-
-## Deployment
-
-### Option 1: Manual (Development)
 ```bash
-./run-bot.sh &
+./run-bot.sh &                        # background; logs to /tmp/mesa-bot.log
 ```
 
-### Option 2: Systemd Service (Production)
+systemd (edit `User=` and the paths in `mesa-bot.service` to match your machine):
+
 ```bash
-# Copy service file
 sudo cp mesa-bot.service /etc/systemd/system/
-
-# Enable and start
-sudo systemctl daemon-reload
-sudo systemctl enable mesa-bot
-sudo systemctl start mesa-bot
-
-# Check status
-sudo systemctl status mesa-bot
-
-# View logs
+sudo systemctl daemon-reload && sudo systemctl enable --now mesa-bot
 journalctl -u mesa-bot -f
 ```
 
-### Option 3: Screen/Tmux (Temporary)
-```bash
-screen -S mesa-bot
-./run-bot.sh
-# Ctrl+A then D to detach
-```
-
-## Customization
-
-### Adjust watchlist
-Edit `mesa/conversational.py`:
-```python
-WATCHLIST = [
-    "PLTR", "COIN", "AMD", ...  # Add/remove tickers
-]
-```
-
-### Adjust screening thresholds
-```python
-MIN_ANNUALIZED_RETURN = 0.15  # 15% annualized
-MIN_OPEN_INTEREST = 100        # Minimum OI
-MAX_BID_ASK_SPREAD_PCT = 0.20  # 20% max spread
-```
-
-### Add new screening criteria
-Edit `parse_criteria()` in `conversational.py`:
-```python
-# Example: earnings calendar
-if "earnings" in msg:
-    criteria["exclude_earnings"] = True
-```
-
-## Examples
-
-### User: "Find me puts under $60 with high IV"
-Bot response:
-```
-🔭 Prospector Results (3 found)
-
-📌 PLTR $45.23
-  Strike: $42 | Exp: 2026-05-15 (37d)
-  Premium: $380/contract | Return: 22.4%
-  Breakeven: $41.62 | Cushion: 7.8%
-  OI: 2,400 | Spread: 8%
-
-[... 2 more results ...]
-```
-
-### User: "Check DDOG, how much premium?"
-Bot response:
-```
-🔭 Prospector Results (1 found)
-
-📌 DDOG $65.40
-  Strike: $62 | Exp: 2026-05-22 (44d)
-  Premium: $450/contract | Return: 18.9%
-  Breakeven: $61.30 | Cushion: 6.3%
-  OI: 1,850 | Spread: 12%
-```
-
-### User: "Top 10 under $50"
-Bot scans all tickers under $50, returns top 10 by annualized return.
-
-## Performance
-
-- **Response time:** ~2-5 seconds (depends on yfinance API)
-- **Daily limit:** No hard limit (rate-limited by yfinance)
-- **Concurrent users:** Polling mode handles single chat ID; can be extended to multi-user with webhook
-
-## Future Enhancements
-
-- [ ] IV rank estimation (Black-Scholes)
-- [ ] Earnings calendar integration
-- [ ] Portfolio tracking
-- [ ] Custom alert thresholds
-- [ ] Multi-user support (webhook with auth)
-- [ ] SQLite logging of screened opportunities
-- [ ] Scheduler for periodic automated screens
-
 ## Troubleshooting
 
-### Bot not responding
-```bash
-# Check service status
-systemctl status mesa-bot
+- **No reply at all** — wrong `TELEGRAM_CHAT_ID` (the log says `Ignoring message from unauthorized chat <id>`),
+  or the bot isn't running (`tail -f /tmp/mesa-bot.log`).
+- **"market is probably closed"** — scan between 9:30 and 16:00 ET.
+- **"No shortlist yet"** — send `scan all` once (or let the cron job run) to build it.
+- **Empty results during market hours** — the gates are deliberately strict; the "Nearest misses" list
+  names the dominant blocker per ticker. Try `check TICKER` to see exactly why one name is out.
+- **Yahoo `429` / "Invalid Crumb" in the log** — transient rate limiting; Mesa retries `.info` lookups
+  and warms up Yahoo's session before fanning out threads.
 
-# Check logs
-tail -f /tmp/mesa-bot.log
+## Tuning
 
-# Or run manually
-./run-bot.sh
-```
-
-### "Telegram not configured"
-Verify `.env` has:
-```
-TELEGRAM_BOT_TOKEN=8797762749:AAFeriwhQtUDN2pWdCSj-2guEiC5pjJ3KJE
-TELEGRAM_CHAT_ID=8724336834
-```
-
-### yfinance errors
-Some tickers may be delisted or have no data. The bot logs and skips them gracefully.
-
-### High latency
-yfinance can be slow for large watchlists. Consider:
-1. Caching data locally
-2. Reducing watchlist size
-3. Using a different data provider (Alpha Vantage, etc.)
-
-## Config
-
-All settings in `mesa/config.py`:
-- `TELEGRAM_BOT_TOKEN` — Bot token from BotFather
-- `TELEGRAM_CHAT_ID` — Your chat ID (where messages go)
-
-Set via environment or `.env` file.
+All thresholds are constants at the top of `mesa/prospector.py` (`SCAN_MIN_PRICE`, `TARGET_DTE_MIN`,
+`TARGET_DELTA_MIN/MAX`, `MIN_OPEN_INTEREST`, `MAX_BID_ASK_SPREAD_PCT`, `CORE_MIN_CUSHION`, …). The
+priority watchlist (`WATCHLIST`) only sets which tickers are marked ⭐ and ranked first.

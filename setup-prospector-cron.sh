@@ -1,12 +1,16 @@
 #!/bin/bash
 
 # Setup MESA Prospector 3x daily cron jobs
-# Runs every weekday: 7:30 AM, 12:00 PM, 4:30 PM MT
+# Runs every weekday: 7:45 AM, 12:00 PM, 1:00 PM MT  (= 9:45 AM, 2:00 PM, 3:00 PM ET)
+#
+# Every slot must fall inside market hours (9:30-16:00 ET = 7:30-14:00 MT): outside them Yahoo
+# returns empty bid/ask quotes and the scan can only report "market closed". The first slot
+# waits 15 minutes past the open so opening-bell quotes have settled.
 
 set -e
 
-VENV_PATH="/home/tom/blackbird_dev/mesa/.venv"
-MESA_PATH="/home/tom/blackbird_dev/mesa"
+MESA_PATH="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+VENV_PATH="$MESA_PATH/.venv"
 LOG_DIR="$MESA_PATH/logs"
 
 echo "╔════════════════════════════════════════════════════════════╗"
@@ -33,9 +37,9 @@ echo ""
 
 # Create crontab entries for 3x daily scans
 # All times in MT timezone
-MORNING="30 7 * * 1-5"      # 7:30 AM MT
-NOON="00 12 * * 1-5"        # 12:00 PM MT
-AFTERNOON="30 16 * * 1-5"   # 4:30 PM MT
+MORNING="45 7 * * 1-5"      # 7:45 AM MT  (9:45 AM ET)
+NOON="00 12 * * 1-5"        # 12:00 PM MT (2:00 PM ET)
+AFTERNOON="00 13 * * 1-5"   # 1:00 PM MT  (3:00 PM ET — last hour before the close)
 
 # Command template
 CMD_TEMPLATE="cd $MESA_PATH && . .venv/bin/activate && python3 -m mesa.cli prospector"
@@ -46,9 +50,9 @@ CRON_NOON="$NOON $CMD_TEMPLATE >> $LOG_DIR/scan-noon.log 2>&1"
 CRON_AFTERNOON="$AFTERNOON $CMD_TEMPLATE >> $LOG_DIR/scan-afternoon.log 2>&1"
 
 echo "Cron jobs to add:"
-echo "  1. Morning (7:30 AM MT):    $MORNING"
+echo "  1. Morning (7:45 AM MT):    $MORNING"
 echo "  2. Noon (12:00 PM MT):      $NOON"
-echo "  3. Afternoon (4:30 PM MT):  $AFTERNOON"
+echo "  3. Afternoon (1:00 PM MT):  $AFTERNOON"
 echo ""
 
 # Check if any already exist
