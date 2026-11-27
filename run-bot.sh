@@ -3,7 +3,7 @@
 # Usage: ./run-bot.sh
 # Logs to: /tmp/mesa-bot.log
 
-cd /home/tom/blackbird_dev/mesa
+cd "$(dirname "$(readlink -f "$0")")" || exit 1
 export PYTHONUNBUFFERED=1
 
 exec .venv/bin/python -c "

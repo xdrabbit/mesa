@@ -2,6 +2,29 @@
 
 **Version 2: Quality-Focused Wheel Strategy**
 
+## As implemented (`mesa/prospector.py`)
+
+The code is the source of truth where it differs from the prose below. Both the cron job and the
+Telegram bot run this one engine:
+
+| Gate | Value | Note |
+|---|---|---|
+| Price band | $50–$110 | Overridable per bot request (`under $80`, `between …`) |
+| Market cap | ≥ $10B | |
+| Excluded | biotech/pharma, crypto, leveraged ETFs, non-REIT financials, non-US | |
+| Solvency | manual distress list + trailing margin ≥ −20% | Missing margin data fails *open* |
+| Earnings | next earnings date must be **after** expiry; unknown date ⇒ excluded | Fails *closed*; always on |
+| DTE | 30–60 | |
+| Delta | 0.20–0.35 | **Estimated** (Black-Scholes from the chain's IV) — Yahoo supplies no greeks |
+| Cushion | ≥ 5% below spot | |
+| Liquidity | open interest ≥ 100, bid-ask spread ≤ 20% | Needs a *live* quote (bid and ask > 0) |
+| Minimum yield | premium ≥ 1% of strike | The doc's "annualized ≥ 15%" cutoff is **not** enforced |
+| Ranking | risk-adjusted score (yield, cushion, IV, liquidity), priority ⭐ names first | One pick per ticker |
+
+Most mega-caps on the priority list now trade above $110 and fail the price band; real candidates come
+from the index universe (see the shortlist in `CONVERSATIONAL.md`). The strategy's fallback watchlist
+and the "ask first, scan priority list" flow below describe the original design.
+
 ## Philosophy
 
 We're not hunting for premium anywhere. We're looking for **quality companies we'd genuinely want to own** if assigned shares, with acceptable premium levels.

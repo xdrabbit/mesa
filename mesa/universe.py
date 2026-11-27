@@ -1,6 +1,12 @@
-"""Stock universe loader — S&P 500 + Nasdaq 100 from Wikipedia, cached locally.
+"""Stock universe loader — S&P 500 (Wikipedia) + Nasdaq 100 (Nasdaq API, Wikipedia fallback).
 
-Cache lives at mesa/data/universe.json with a 7-day TTL.
+Cache lives at mesa/data/universe.json with a 7-day TTL. Loading is fail-soft: either source
+may be down (Wikipedia dropped its Nasdaq-100 constituents table in 2026), and a stale cache is
+preferred over crashing the scan.
+
+Also keeps a small "shortlist" cache (mesa/data/shortlist.json): the tickers that passed the
+cheap prefilter on the last full scan, so the Telegram bot can answer quickly without
+re-scanning ~500 names.
 """
 from __future__ import annotations
 
@@ -17,9 +23,12 @@ log = logging.getLogger(__name__)
 
 CACHE_PATH = Path(__file__).resolve().parent / "data" / "universe.json"
 CACHE_TTL = timedelta(days=7)
+SHORTLIST_PATH = Path(__file__).resolve().parent / "data" / "shortlist.json"
+SHORTLIST_MAX_AGE = timedelta(days=3)
 
 SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 NDX_URL = "https://en.wikipedia.org/wiki/Nasdaq-100"
+NDX_API_URL = "https://api.nasdaq.com/api/quote/list-type/nasdaq100"
 USER_AGENT = "Mozilla/5.0 (compatible; mesa-prospector/1.0)"
 
 _FOOTNOTE_RE = re.compile(r"\s*\[[^\]]*\]\s*$")
@@ -53,7 +62,22 @@ def _fetch_sp500() -> list[str]:
     return tickers
 
 
-def _fetch_ndx() -> list[str]:
+def _fetch_ndx_api() -> list[str]:
+    resp = requests.get(
+        NDX_API_URL,
+        headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    rows = resp.json()["data"]["data"]["rows"]
+    tickers = [_normalize(r["symbol"]) for r in rows if r.get("symbol")]
+    tickers = [t for t in tickers if t and t.replace("-", "").isalnum() and len(t) <= 6]
+    if len(tickers) < 50:
+        raise RuntimeError(f"Nasdaq API returned only {len(tickers)} symbols")
+    return tickers
+
+
+def _fetch_ndx_wikipedia() -> list[str]:
     soup = BeautifulSoup(_get(NDX_URL), "html.parser")
     for table in soup.find_all("table", class_="wikitable"):
         headers = [th.get_text(strip=True).lower() for th in table.find_all("th")]
@@ -76,26 +100,52 @@ def _fetch_ndx() -> list[str]:
     raise RuntimeError("Nasdaq-100 constituents table not found on Wikipedia")
 
 
+def _fetch_ndx() -> list[str]:
+    try:
+        return _fetch_ndx_api()
+    except Exception as e:
+        log.warning("Nasdaq API unavailable (%s); falling back to Wikipedia", e)
+        return _fetch_ndx_wikipedia()
+
+
 def fetch_universe() -> list[str]:
-    sp500 = _fetch_sp500()
-    ndx = _fetch_ndx()
-    log.info("Fetched %d S&P 500 + %d Nasdaq-100 tickers", len(sp500), len(ndx))
-    return sorted(set(sp500) | set(ndx))
+    """Union of whichever sources respond. Raises only if *both* fail."""
+    tickers: set[str] = set()
+    for name, fetch in (("S&P 500", _fetch_sp500), ("Nasdaq-100", _fetch_ndx)):
+        try:
+            got = fetch()
+        except Exception as e:
+            log.warning("%s source failed: %s", name, e)
+            continue
+        log.info("Fetched %d %s tickers", len(got), name)
+        tickers.update(got)
+    if not tickers:
+        raise RuntimeError("Could not fetch any index constituents (S&P 500 and Nasdaq-100 both failed)")
+    return sorted(tickers)
 
 
 def load_universe(force_refresh: bool = False) -> list[str]:
     """Return cached universe, refreshing if missing or older than CACHE_TTL."""
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if not force_refresh and CACHE_PATH.exists():
+    stale: list[str] | None = None
+    if CACHE_PATH.exists():
         try:
             data = json.loads(CACHE_PATH.read_text())
             fetched = datetime.fromisoformat(data["fetched_at"])
-            if datetime.now(timezone.utc) - fetched < CACHE_TTL:
-                return list(data["tickers"])
+            cached = list(data["tickers"])
+            if not force_refresh and datetime.now(timezone.utc) - fetched < CACHE_TTL:
+                return cached
+            stale = cached or None
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             log.warning("Universe cache unreadable, refreshing: %s", e)
 
-    tickers = fetch_universe()
+    try:
+        tickers = fetch_universe()
+    except Exception as e:
+        if stale:
+            log.warning("Universe refresh failed (%s); using stale cache of %d tickers", e, len(stale))
+            return stale
+        raise
     CACHE_PATH.write_text(
         json.dumps(
             {
@@ -108,6 +158,37 @@ def load_universe(force_refresh: bool = False) -> list[str]:
     )
     log.info("Saved universe cache: %d tickers → %s", len(tickers), CACHE_PATH)
     return tickers
+
+
+def save_shortlist(tickers: list[str]) -> None:
+    """Remember which tickers passed the prefilter on the latest full scan."""
+    SHORTLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SHORTLIST_PATH.write_text(
+        json.dumps(
+            {
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "count": len(tickers),
+                "tickers": sorted(set(tickers)),
+            },
+            indent=2,
+        )
+    )
+    log.info("Saved shortlist: %d tickers → %s", len(tickers), SHORTLIST_PATH)
+
+
+def load_shortlist() -> list[str]:
+    """Tickers from the last full scan, or [] if missing/unreadable/older than SHORTLIST_MAX_AGE."""
+    if not SHORTLIST_PATH.exists():
+        return []
+    try:
+        data = json.loads(SHORTLIST_PATH.read_text())
+        saved = datetime.fromisoformat(data["saved_at"])
+        if datetime.now(timezone.utc) - saved > SHORTLIST_MAX_AGE:
+            return []
+        return list(data["tickers"])
+    except (json.JSONDecodeError, KeyError, ValueError) as e:
+        log.warning("Shortlist cache unreadable, ignoring: %s", e)
+        return []
 
 
 if __name__ == "__main__":

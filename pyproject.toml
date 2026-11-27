@@ -9,7 +9,15 @@ dependencies = [
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "rich>=13.0",
+    "requests>=2.31",        # mesa.universe
+    "beautifulsoup4>=4.12",  # mesa.universe (Wikipedia S&P 500 table)
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [project.scripts]
 mesa = "mesa.cli:main"

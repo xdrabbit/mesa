@@ -8,5 +8,7 @@
 # Watchdog summary: 6:00 PM MT Sunday (always sends full report)
 0 18 * * 0 cd /path/to/mesa && .venv/bin/mesa watchdog --summary >> /var/log/mesa/watchdog.log 2>&1
 
-# Prospector: 5:00 PM MT Sunday
-0 17 * * 0 cd /path/to/mesa && .venv/bin/mesa prospector >> /var/log/mesa/prospector.log 2>&1
+# Prospector: 7:45 AM MT Mon-Fri (9:45 AM ET). Must run while the market is open (7:30 AM-2:00 PM MT):
+# Yahoo returns empty option quotes after hours, so an evening/weekend scan can only say "market closed".
+# For 3 scans a day use ./setup-prospector-cron.sh instead.
+45 7 * * 1-5 cd /path/to/mesa && .venv/bin/mesa prospector >> /var/log/mesa/prospector.log 2>&1

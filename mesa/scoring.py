@@ -18,12 +18,51 @@ log = logging.getLogger(__name__)
 # Constants
 CRYPTO_EXCLUSION = {"MARA", "RIOT", "COIN", "MSTR", "CLSK", "HOOD"}
 ACCOUNTING_ISSUES = set()
-MIN_STOCK_PRICE = 80.0
-MAX_STOCK_PRICE = 140.0
+MIN_STOCK_PRICE = 50.0
+MAX_STOCK_PRICE = 110.0
 MIN_MARKET_CAP = 1e10  # $10B
-MIN_IV = 0.35
-MAX_IV = 0.65
+MIN_IV = 0.0
+MAX_IV = 1.50
 MIN_DAYS_TO_EARNINGS = 14
+
+
+def risk_score(
+    premium_pct_of_strike: float,
+    cushion_pct: float,
+    iv: Optional[float],
+    oi: int,
+    spread_pct: float,
+) -> float:
+    """Risk-adjusted 0-100 score: premium 40% / cushion 30% / IV-centeredness 20% / liquidity 10%.
+
+    Shared by the conversational screener (``Candidate._calculate_score``) and the automated
+    prospector scan so both rank by the same risk-adjusted blend instead of raw annualized
+    yield. ``premium_pct_of_strike`` is expressed in PERCENT (e.g. 1.5 == 1.5% of strike).
+    """
+    # Premium quality (40%) - Scale to 0-100, capped at 5% = 100
+    premium_score = min(100, (premium_pct_of_strike / 5.0) * 100)
+
+    # Cushion % (30%) - Scale to 0-100, 15% = 100
+    cushion_score = min(100, (cushion_pct / 0.15) * 100)
+
+    # IV level (20%) - Closer to 50% is better; IV is informational, not required.
+    if iv:
+        iv_distance = abs(iv - 0.50)
+        iv_score = max(0, 100 - (iv_distance / 0.50) * 100)
+    else:
+        iv_score = 50  # Neutral if IV not available
+
+    # Liquidity (10%) - OI and spread combined
+    oi_score = min(100, (oi / 500.0) * 100)  # 500+ OI = 100
+    spread_score = max(0, 100 - (spread_pct / 0.20) * 100)  # 20% spread = 0
+    liquidity_score = (oi_score + spread_score) / 2
+
+    return (
+        premium_score * 0.40
+        + cushion_score * 0.30
+        + iv_score * 0.20
+        + liquidity_score * 0.10
+    )
 
 
 class Candidate:
@@ -96,7 +135,7 @@ class Candidate:
         
         if self.price < MIN_STOCK_PRICE or self.price > MAX_STOCK_PRICE:
             self.color = "🔴"
-            self.reason = f"price ${self.price:.0f} outside ${MIN_STOCK_PRICE}-${MAX_STOCK_PRICE} range"
+            self.reason = f"price ${self.price:.0f} outside ${MIN_STOCK_PRICE:.0f}-${MAX_STOCK_PRICE:.0f} range (max ~$10k security)"
             self.score = 0
             return
         
@@ -118,23 +157,24 @@ class Candidate:
         if self.days_to_earnings and self.days_to_earnings < MIN_DAYS_TO_EARNINGS:
             yellow_flags.append(f"earnings in {self.days_to_earnings}d")
         
-        if self.dte < 25 or self.dte > 45:
-            yellow_flags.append(f"DTE {self.dte}d outside 25-45d")
-        
-        if self.delta < 0.20 or self.delta > 0.30:
-            yellow_flags.append(f"delta {self.delta:.2f} outside 0.20-0.30")
-        
+        if self.dte < 30 or self.dte > 60:
+            yellow_flags.append(f"DTE {self.dte}d outside 30-60d")
+
+        # Delta check (optional - only if yfinance provides it)
+        if self.delta > 0 and (self.delta < 0.20 or self.delta > 0.35):
+            yellow_flags.append(f"delta {self.delta:.2f} outside 0.20-0.35")
+
         if self.cushion_pct < 0.08:
             yellow_flags.append(f"cushion {self.cushion_pct:.1%} < 8%")
         
         if self.premium_pct_of_strike < 1.0:
             yellow_flags.append(f"premium {self.premium_pct_of_strike:.2f}% < 1.0% of strike")
         
-        if self.oi < 500:
-            yellow_flags.append(f"OI {self.oi} < 500")
-        
-        if self.spread_pct > 0.05:
-            yellow_flags.append(f"spread {self.spread_pct:.1%} > 5%")
+        if self.oi < 100:
+            yellow_flags.append(f"OI {self.oi} < 100")
+
+        if self.spread_pct > 0.20:
+            yellow_flags.append(f"spread {self.spread_pct:.1%} > 20%")
         
         if yellow_flags:
             self.color = "🟡"
@@ -149,39 +189,16 @@ class Candidate:
     
     def _calculate_score(self) -> None:
         """Calculate 0-100 score based on weighted components.
-        
-        Components:
-        - Premium quality (40%): Higher premium % of strike = better
-        - Cushion % (30%): Greater distance from current = safer
-        - IV level (20%): Closer to 50% midpoint is ideal
-        - Liquidity (10%): Higher OI and tighter spread
+
+        Delegates to the module-level :func:`risk_score` so the conversational screener and
+        the automated prospector scan share one risk-adjusted ranking formula.
         """
-        
-        # Premium quality (40%) - Scale to 0-100, capped at 5% = 100
-        premium_score = min(100, (self.premium_pct_of_strike / 5.0) * 100)
-        
-        # Cushion % (30%) - Scale to 0-100, 15% = 100
-        cushion_score = min(100, (self.cushion_pct / 0.15) * 100)
-        
-        # IV level (20%) - Closer to 50% (midpoint of 35-65) is better
-        if self.iv:
-            iv_center = (MIN_IV + MAX_IV) / 2  # 0.50
-            iv_distance = abs(self.iv - iv_center)
-            iv_max_distance = (MAX_IV - MIN_IV) / 2  # 0.15
-            iv_score = max(0, 100 - (iv_distance / iv_max_distance) * 100)
-        else:
-            iv_score = 50  # Neutral if IV not available
-        
-        # Liquidity (10%) - OI and spread combined
-        oi_score = min(100, (self.oi / 1000.0) * 100)  # 1000+ OI = 100
-        spread_score = max(0, 100 - (self.spread_pct / 0.05) * 100)  # 5% spread = 0
-        liquidity_score = (oi_score + spread_score) / 2
-        
-        self.score = (
-            premium_score * 0.40 +
-            cushion_score * 0.30 +
-            iv_score * 0.20 +
-            liquidity_score * 0.10
+        self.score = risk_score(
+            premium_pct_of_strike=self.premium_pct_of_strike,
+            cushion_pct=self.cushion_pct,
+            iv=self.iv,
+            oi=self.oi,
+            spread_pct=self.spread_pct,
         )
     
     def format_green(self) -> str:
