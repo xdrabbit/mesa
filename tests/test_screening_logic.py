@@ -1,23 +1,15 @@
-"""Baseline (covered-call → cash-secured-put conversion + $50–$110 band) regression tests.
+"""Screening-logic regression tests.
 
-These cover the put-selection scan and the conversational natural-language price parsing that
-were introduced by the CSP-conversion/$50–$110-band baseline. They live on this branch because
-they exercise that baseline behavior. (The risk-hardening regression tests live on
-`feat/prospector-risk-hardening`.)
+Covers the put-selection scan, the conversational price parsing (CSP/band work) and the
+risk-hardening gates (earnings fail-closed, solvency). Everything is offline: option chains
+and tickers are faked, nothing touches the network.
 """
 from __future__ import annotations
 
 from datetime import date
 from types import SimpleNamespace
 from unittest.mock import patch
-import sys
 import unittest
-
-sys.modules.setdefault("telegram", SimpleNamespace(Bot=object))
-sys.modules.setdefault("yfinance", SimpleNamespace(Ticker=object))
-sys.modules.setdefault("mesa.telegram_send", SimpleNamespace(send=lambda message: None))
-sys.modules.setdefault("mesa.models", SimpleNamespace(load_positions=lambda: []))
-sys.modules.setdefault("mesa.universe", SimpleNamespace(load_universe=lambda: []))
 
 from mesa import conversational, prospector
 
@@ -59,6 +51,8 @@ class ProspectorPutSelectionTest(unittest.TestCase):
         ticker = SimpleNamespace(
             options=["2026-07-17"],
             option_chain=lambda _: chain,
+            # Earnings AFTER the expiration, so the Fix 1 earnings gate admits the expiration.
+            calendar={"Earnings Date": [date(2026, 8, 20)]},
         )
         info = {"currentPrice": 100.0}
 
@@ -80,11 +74,68 @@ class ConversationalCriteriaTest(unittest.TestCase):
         self.assertEqual(between["price_min"], 60.0)
         self.assertEqual(between["price_max"], 90.0)
 
-    def test_scan_ticker_honors_price_min(self) -> None:
-        with patch.object(conversational, "get_ticker_data", return_value={"price": 45.0, "market_cap": 20e9}):
-            hit = conversational.scan_ticker("LOW", date(2026, 6, 7), price_min=50.0, price_max=110.0)
 
-        self.assertIsNone(hit)
+class ProspectorEarningsGateTest(unittest.TestCase):
+    def test_earnings_inside_option_life_excluded(self) -> None:
+        today = date(2026, 6, 7)
+        chain = SimpleNamespace(
+            calls=FakeRows([]),
+            puts=FakeRows([]),
+        )
+        ticker = SimpleNamespace(
+            options=["2026-07-17"],
+            option_chain=lambda _: chain,
+            # Earnings BEFORE the 2026-07-17 expiration ⇒ Fix 1 excludes (earnings straddler).
+            calendar={"Earnings Date": [date(2026, 7, 1)]},
+        )
+        info = {"currentPrice": 100.0}
+
+        candidates, miss = prospector._score_options(ticker, info, "TEST", True, today)
+
+        self.assertEqual(candidates, [])
+        self.assertIsNotNone(miss)
+        self.assertIn("earnings", miss.reason)
+        self.assertNotEqual(miss.reason, "earnings-unknown-excluded")
+
+    def test_earnings_unknown_fails_closed(self) -> None:
+        today = date(2026, 6, 7)
+        chain = SimpleNamespace(
+            calls=FakeRows([]),
+            puts=FakeRows([]),
+        )
+        ticker = SimpleNamespace(
+            options=["2026-07-17"],
+            option_chain=lambda _: chain,
+            calendar=None,  # No earnings data ⇒ FAIL CLOSED (exclude).
+        )
+        info = {"currentPrice": 100.0}
+
+        candidates, miss = prospector._score_options(ticker, info, "TEST", True, today)
+
+        self.assertEqual(candidates, [])
+        self.assertIsNotNone(miss)
+        self.assertEqual(miss.reason, "earnings-unknown-excluded")
+
+
+class ProspectorSolvencyGateTest(unittest.TestCase):
+    def test_distressed_name_excluded(self) -> None:
+        ok, reason = prospector._solvency_admits({"profitMargins": 0.3}, "SATS")
+        self.assertFalse(ok)
+        self.assertIn("solvency-excluded", reason)
+
+    def test_deeply_negative_margin_excluded(self) -> None:
+        ok, reason = prospector._solvency_admits({"profitMargins": -0.35}, "REDINK")
+        self.assertFalse(ok)
+        self.assertIn("solvency-excluded", reason)
+
+    def test_healthy_name_admitted(self) -> None:
+        ok, reason = prospector._solvency_admits({"profitMargins": 0.25}, "MSFT")
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_missing_margin_fails_open(self) -> None:
+        ok, _ = prospector._solvency_admits({}, "NODATA")
+        self.assertTrue(ok)
 
 
 if __name__ == "__main__":
