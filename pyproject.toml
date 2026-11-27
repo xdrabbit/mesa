@@ -11,7 +11,6 @@ dependencies = [
     "rich>=13.0",
     "requests>=2.31",        # mesa.universe
     "beautifulsoup4>=4.12",  # mesa.universe (Wikipedia S&P 500 table)
-    "pytz>=2023.3",          # mesa.morning_brief
 ]
 
 [project.optional-dependencies]

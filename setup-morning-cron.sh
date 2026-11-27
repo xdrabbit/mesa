@@ -1,12 +1,14 @@
 #!/bin/bash
 
 # Setup MESA morning briefing cron job
-# Runs every weekday at 7:30 AM MT (9:30 AM ET - market open)
+# Runs every weekday at 7:45 AM MT (9:45 AM ET). Must be inside market hours: outside them Yahoo
+# returns empty option quotes. 15 min past the open lets opening-bell quotes settle.
 
 set -e
 
-VENV_PATH="/home/tom/blackbird_dev/mesa/.venv"
-SCRIPT_PATH="/home/tom/blackbird_dev/mesa/mesa/morning_brief.py"
+MESA_PATH="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+VENV_PATH="$MESA_PATH/.venv"
+SCRIPT_PATH="$MESA_PATH/mesa/morning_brief.py"
 LOG_DIR="/var/log/mesa"
 
 echo "╔════════════════════════════════════════════════════════════╗"
@@ -36,22 +38,23 @@ echo "✓ Script path: $SCRIPT_PATH"
 echo ""
 
 # Create crontab entry
-# 7:30 AM MT = 30 7 * * 1-5 (weekdays only)
-CRON_ENTRY="30 7 * * 1-5 source $VENV_PATH/bin/activate && python $SCRIPT_PATH >> $LOG_DIR/morning_brief.log 2>&1"
+# 7:45 AM MT = 45 7 * * 1-5 (weekdays only)
+# Call the venv's python directly: cron runs /bin/sh, which on Debian/Ubuntu is dash and has no
+# `source`, so the old "source .../activate && python ..." entry silently never ran.
+CRON_ENTRY="45 7 * * 1-5 $VENV_PATH/bin/python $SCRIPT_PATH >> $LOG_DIR/morning_brief.log 2>&1"
 
 echo "Adding cron job:"
-echo "  Time: 7:30 AM MT (weekdays only)"
+echo "  Time: 7:45 AM MT (weekdays only)"
 echo "  Command: python morning_brief.py"
 echo "  Log: $LOG_DIR/morning_brief.log"
 echo ""
 
-# Add to crontab (avoid duplicates)
+# Replace any previous entry (an older one may use the broken `source` form)
 if crontab -l 2>/dev/null | grep -q "morning_brief.py"; then
-  echo "⚠️  Cron job already exists. Skipping..."
-else
-  (crontab -l 2>/dev/null; echo "$CRON_ENTRY") | crontab -
-  echo "✓ Cron job added"
+  echo "Replacing existing morning_brief cron entry..."
 fi
+(crontab -l 2>/dev/null | grep -v "morning_brief.py"; echo "$CRON_ENTRY") | crontab -
+echo "✓ Cron job added"
 
 echo ""
 echo "╔════════════════════════════════════════════════════════════╗"
@@ -65,5 +68,5 @@ echo "View logs:"
 echo "  tail -f $LOG_DIR/morning_brief.log"
 echo ""
 echo "Test immediately (without waiting):"
-echo "  source $VENV_PATH/bin/activate && python $SCRIPT_PATH"
+echo "  $VENV_PATH/bin/python $SCRIPT_PATH"
 echo ""
